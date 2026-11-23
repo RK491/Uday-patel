@@ -56,6 +56,7 @@ import {
   decodeTaskSubtitleMeta,
   DEFAULT_AD_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_ECONOMY_CONFIG,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
@@ -73,11 +74,14 @@ import {
   filterPlayersBySearchQuery,
   getCoopFeverProgress,
   isAutoHarvestDroneActive,
+  isChannelVerificationSatisfied,
   isCoopFeverActive,
+  isMustJoinChannelsEnabled,
   MIN_REINVEST_EGGS,
   purchaseAutoHarvestDrone,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveEconomyConfig,
   resolveMaintenanceConfig,
   USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
@@ -98,6 +102,7 @@ import {
   getChickenMilestoneReached,
   getCoopFeverAdsWatched,
   getEffectiveAdminIds,
+  getTaskChannelCheckMode,
   WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT,
   WITHDRAW_ADS_DEDUCTION_RATE,
   getGoldenEggCooldownRemainingMs,
@@ -114,6 +119,7 @@ import {
   isFeedBoosterActive,
   isGoldenEggReady,
   isTelegramMemberStatusJoined,
+  isVerifiableTelegramChannelUrl,
   matchesAdminRecord,
   matchesBannedUserRecord,
   MAX_DEPOSIT_COINS,
@@ -249,7 +255,7 @@ test('mining does not start before buying a chicken, and starts cleanly after pu
   assert.equal(capped, twoHensProfile.basketCapacity);
 });
 
-test('collectEggs increments balance, resets timer, and computes 5% lifetime referral egg commission', () => {
+test('collectEggs increments balance, resets timer, and grants zero referral egg commission', () => {
   const { profile, transactions } = createDefaultProfile('player_test1', 'RK', '@rk', NOW);
   assert.equal(profile.coins, SIGNUP_BONUS_COINS);
   assert.equal(SIGNUP_BONUS_COINS, 1000);
@@ -272,7 +278,7 @@ test('collectEggs increments balance, resets timer, and computes 5% lifetime ref
     100,
   );
   assert.ok(!('error' in referredResult));
-  assert.equal(referredResult.referralEggCommission, 5);
+  assert.equal(referredResult.referralEggCommission, 0);
 });
 
 test('buyChickens deducts coins and increases production', () => {
@@ -634,17 +640,20 @@ test('matchGramTransfersFromTonApiEvents rejects spam, fake GRAM tokens, unconfi
   );
 });
 
-test('referral bonus constants and 5% lifetime egg commission calculate accurately', () => {
+test('referral reward constants allow only +150 coins per verified refer & 5% lifetime deposit commission', () => {
   assert.equal(REFERRER_SIGNUP_BONUS_COINS, 150);
-  assert.equal(REFERRER_LIFETIME_EGG_COMMISSION_RATE, 0.05);
+  assert.equal(REFERRAL_DEPOSIT_COMMISSION_RATE, 0.05);
+  assert.equal(REFERRED_WELCOME_BONUS_COINS, 0);
+  assert.equal(REFERRER_LIFETIME_EGG_COMMISSION_RATE, 0);
+  assert.equal(REFERRER_SIGNUP_BONUS_EGGS, 0);
   assert.equal(calculateReferralEggCommission(0), 0);
-  assert.equal(calculateReferralEggCommission(10), 1);
-  assert.equal(calculateReferralEggCommission(100), 5);
-  assert.equal(calculateReferralEggCommission(300), 15);
+  assert.equal(calculateReferralEggCommission(10), 0);
+  assert.equal(calculateReferralEggCommission(100), 0);
+  assert.equal(calculateReferralEggCommission(300), 0);
 
   assert.equal(calculateReferralBonusEggs(0), 0);
-  assert.equal(calculateReferralBonusEggs(200), REFERRER_SIGNUP_BONUS_EGGS);
-  assert.equal(calculateReferralBonusEggs(400), 1000);
+  assert.equal(calculateReferralBonusEggs(200), 0);
+  assert.equal(calculateReferralBonusEggs(400), 0);
 });
 
 test('basket-full browser notification triggers only when full, in background, enabled, granted, and once per cycle', () => {
@@ -790,7 +799,7 @@ test('referred player activates referral only on 1st chicken purchase and summar
   ]);
   assert.equal(summary.pendingCount, 1);
   assert.equal(summary.activeCount, 1);
-  assert.equal(summary.totalBonusEggs, REFERRER_SIGNUP_BONUS_EGGS);
+  assert.equal(summary.totalBonusEggs, 0);
 });
 
 test('getChickenMilestoneReached detects 5, 10, 25 milestones and detectTop10RankCelebration guards initial load', () => {
@@ -1383,6 +1392,8 @@ test('referralShare builds Telegram Mini App t.me startapp URL with auto-detecte
   const decodedTgText = decodeURIComponent(tgDirectShare.replace('https://t.me/share/url?text=', ''));
   assert.ok(decodedTgText.endsWith(url));
   assert.ok(decodedTgText.includes("Rahul's"));
+  assert.ok(!decodedTgText.includes('1,100'));
+  assert.ok(!decodedTgText.includes('+100 EXTRA'));
 
   const payload = buildReferralShareData('7508911853', url, 'Rahul');
   assert.equal(payload.title, 'Join Alpha Gram!');
@@ -1390,6 +1401,7 @@ test('referralShare builds Telegram Mini App t.me startapp URL with auto-detecte
   assert.ok(!payload.text?.includes('7508911853'));
   assert.ok(payload.text?.includes("Rahul's"));
   assert.ok(payload.text?.includes('Alpha Gram farm and claim +1,000 sign-up bonus coins!'));
+  assert.ok(!payload.text?.includes('+100 EXTRA'));
 
   // 1. Web Share API succeeds
   let sharedPayload: ShareData | null = null;
@@ -1682,25 +1694,12 @@ test('achievements unlock on progress milestones and prevent duplicate claims', 
   assert.ok('error' in dup);
 });
 
-test('referral milestone crates unlock at 3/10/25 active referrals and grant coins + hens', () => {
+test('referral milestone crates are disabled when only verified refer coins & 5% deposit share apply', () => {
   const { profile } = createDefaultProfile('player_refcrate', 'Neha', '@neha', NOW);
-  assert.equal(REFERRAL_MILESTONE_CRATES.length, 3);
+  assert.equal(REFERRAL_MILESTONE_CRATES.length, 0);
 
-  const locked = claimReferralMilestone(profile, 3, 2, NOW);
-  assert.ok('error' in locked);
-
-  const bronze = claimReferralMilestone({ ...profile, referralCount: 3 }, 3, 3, NOW);
-  assert.ok(!('error' in bronze));
-  assert.equal(bronze.crate.rewardCoins, 300);
-  assert.equal(bronze.profile.leghornCount, profile.leghornCount);
-
-  const silver = claimReferralMilestone({ ...bronze.profile, referralCount: 10 }, 10, 10, NOW);
-  assert.ok(!('error' in silver));
-  assert.equal(silver.crate.rewardCoins, 1200);
-  assert.equal(silver.profile.leghornCount, profile.leghornCount + 1);
-
-  const dup = claimReferralMilestone(silver.profile, 10, 10, NOW + 1000);
-  assert.ok('error' in dup);
+  const attempt = claimReferralMilestone({ ...profile, referralCount: 25 }, 3, 25, NOW);
+  assert.ok('error' in attempt);
 });
 
 test('buildEarningsChartSeries aggregates daily eggs collected and coin inflows cleanly', () => {
@@ -2817,27 +2816,27 @@ test('referral reward is 150 coins, deposit commission is 5%, and bot notificati
     event: 'referral_joined',
     referredName: 'Alex <script>',
     referredHandle: 'alex_gram',
-    rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+    rewardCoins: 250,
   });
-  assert.ok(joinMsg.includes('New Referral Received'));
-  assert.ok(joinMsg.includes('+150 Coins'));
-  assert.ok(joinMsg.includes('5% share'));
-  assert.ok(joinMsg.includes('deposit'));
+  assert.ok(joinMsg.includes('Referral Reward Credited'));
+  assert.ok(joinMsg.includes('+250 Coins'));
+  assert.ok(joinMsg.includes('5% lifetime share'));
   assert.ok(joinMsg.includes('Alex &lt;script&gt;'));
   assert.ok(joinMsg.includes('@alex_gram'));
+  assert.ok(joinMsg.split('\n').length <= 5);
 
   const pendingMsg = buildReferralBotNotificationMessage({
     event: 'referral_pending',
     referredName: 'Alex <script>',
     referredHandle: 'alex_gram',
-    rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+    rewardCoins: 250,
   });
-  assert.ok(pendingMsg.includes('New Referral Received'));
-  assert.ok(pendingMsg.includes('+150 Coins'));
-  assert.ok(pendingMsg.includes('1st Chicken (Miner)'));
-  assert.ok(pendingMsg.includes('+100 Coins'));
+  assert.ok(pendingMsg.includes('New Referral Joined'));
+  assert.ok(pendingMsg.includes('+250 Coins'));
+  assert.ok(pendingMsg.includes('1st hen'));
   assert.ok(pendingMsg.includes('Alex &lt;script&gt;'));
   assert.ok(pendingMsg.includes('@alex_gram'));
+  assert.ok(pendingMsg.split('\n').length <= 4);
 
   const commissionMsg = buildReferralBotNotificationMessage({
     event: 'deposit_commission',
@@ -2847,10 +2846,35 @@ test('referral reward is 150 coins, deposit commission is 5%, and bot notificati
     depositGram: '0.4413 GRAM',
     depositUsd: 0.5,
   });
-  assert.ok(commissionMsg.includes('Referral Deposit Commission Received'));
-  assert.ok(commissionMsg.includes('+250 Coins'));
+  assert.ok(commissionMsg.includes('+250 Coins Commission'));
   assert.ok(commissionMsg.includes('0.4413 GRAM'));
   assert.ok(commissionMsg.includes('5%'));
+  assert.ok(commissionMsg.split('\n').length <= 4);
+
+  // Dynamic economy config & custom minWithdrawEggs
+  const customEco = resolveEconomyConfig({ minWithdrawEggs: 50, perReferRewardCoins: 300 });
+  assert.equal(customEco.minWithdrawEggs, 50);
+  assert.equal(customEco.perReferRewardCoins, 300);
+  assert.equal(resolveEconomyConfig(null).minWithdrawEggs, DEFAULT_ECONOMY_CONFIG.minWithdrawEggs);
+
+  const customMinFail = executeWithdrawal(
+    { ...referredPlayer, eggs: 80, withdrawAdsWatched: 30 },
+    40,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW,
+    50,
+  );
+  assert.ok('error' in customMinFail && customMinFail.error.includes('50 eggs'));
+  const customMinOk = executeWithdrawal(
+    { ...referredPlayer, eggs: 80, withdrawAdsWatched: 30 },
+    50,
+    'UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr',
+    '',
+    NOW,
+    50,
+  );
+  assert.ok(!('error' in customMinOk));
 });
 
 test('full-screen 1,000 coins sign-up bonus shows for all new users (referral and non-referral) until claimed', () => {
@@ -3512,7 +3536,7 @@ test('applyLeftChannelPenalties deducts 5x coins into negative debt and future e
   assert.equal(repaid.profile.coins, -370);
 });
 
-test('renderPayoutChannelApproveMessage matches approval style with farmer name & amount without leaking full wallet or handle', () => {
+test('renderPayoutChannelApproveMessage matches approval style with txId, farmer name, amount & bot link without leaking full wallet or handle', () => {
   const fullWallet = 'UQAOZ7I-xhBLou2dkPqKUdQKA_ZbwKBjP_p85i73Fp2P1RXr';
   const chMsg = renderPayoutChannelApproveMessage({
     template: DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
@@ -3523,14 +3547,61 @@ test('renderPayoutChannelApproveMessage matches approval style with farmer name 
     displayName: 'Rahul',
     txId: 'wd_9911223344',
     adminNote: 'Manual payout',
-    miniAppUrl: 'https://t.me/Alpha_gram_bot/Alpha',
+    miniAppUrl: 'https://t.me/AlphaGramAiBot/Alpha',
   });
 
   assert.match(chMsg.htmlText, /Withdrawal Paid/i);
   assert.match(chMsg.htmlText, /Rahul/);
   assert.match(chMsg.htmlText, /12\.50 GRAM/);
+  assert.match(chMsg.htmlText, /wd_9911223344/);
+  assert.match(chMsg.htmlText, /<a href="https:\/\/t\.me\/AlphaGramAiBot\/Alpha">.*@AlphaGramAiBot.*<\/a>/);
   assert.ok(!chMsg.htmlText.includes(fullWallet), 'must not expose full wallet in public channel');
   assert.ok(!chMsg.buttonUrl.includes(fullWallet), 'must not put full wallet in channel button URL');
+  assert.equal(chMsg.inlineButtons.length, 1);
+  assert.equal(chMsg.inlineButtons[0].length, 1);
+  assert.equal(chMsg.botButtonUrl, 'https://t.me/AlphaGramAiBot/Alpha');
+
+  const chMsgDefaultBot = renderPayoutChannelApproveMessage({
+    template: DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
+    gramAmount: '5.00',
+    eggsAmount: 600,
+    walletAddress: fullWallet,
+    usdValue: 0.06,
+    displayName: 'Amit',
+    txId: 'wd_112233',
+  });
+  assert.match(
+    chMsgDefaultBot.htmlText,
+    /<a href="https:\/\/t\.me\/AlphaGramAiBot">@AlphaGramAiBot — Open Alpha Gram<\/a>/,
+  );
+  assert.equal(chMsgDefaultBot.botButtonUrl, 'https://t.me/AlphaGramAiBot');
+  assert.equal(chMsgDefaultBot.inlineButtons[0][0].url, 'https://t.me/AlphaGramAiBot');
+
+  const txHashNote = 'a'.repeat(64);
+  const chMsgWithTx = renderPayoutChannelApproveMessage({
+    template: DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
+    gramAmount: '12.50',
+    eggsAmount: 1500,
+    walletAddress: fullWallet,
+    usdValue: 0.15,
+    displayName: 'Rahul',
+    txId: 'wd_9911223344',
+    adminNote: txHashNote,
+    miniAppUrl: 'https://t.me/AlphaGramAiBot/Alpha',
+  });
+  assert.equal(chMsgWithTx.inlineButtons.length, 1);
+  assert.equal(chMsgWithTx.inlineButtons[0].length, 2);
+  assert.match(chMsgWithTx.inlineButtons[0][0].url, /tonviewer\.com\/transaction\//);
+  assert.equal(chMsgWithTx.inlineButtons[0][1].url, 'https://t.me/AlphaGramAiBot/Alpha');
+});
+
+test('sanitizeExternalUrl blocks unsafe schemes and preserves valid web and deep links cleanly', async () => {
+  const { sanitizeExternalUrl } = await import('./economy');
+  assert.equal(sanitizeExternalUrl('javascript:alert(1)'), '');
+  assert.equal(sanitizeExternalUrl('data:text/html,<script>alert(1)</script>'), '');
+  assert.equal(sanitizeExternalUrl('ton://transfer/UQD_test'), '');
+  assert.equal(sanitizeExternalUrl('ton://transfer/UQD_test', { allowDeepLinks: true }), 'ton://transfer/UQD_test');
+  assert.equal(sanitizeExternalUrl('https://t.me/AlphaGramAiBot'), 'https://t.me/AlphaGramAiBot');
 });
 
 test('server referralStorage saves, deduplicates, guards self-referrals, merges tg_ variants, and resets cleanly', () => {
@@ -3687,10 +3758,11 @@ test('lifetime 5% deposit commission pays on 1st, 2nd, and 3rd deposits alongsid
   const { profile: base } = createDefaultProfile('tg_555000111', 'Maya', '@maya_tg', NOW);
   let referred = {
     ...base,
-    coins: base.coins + REFERRED_WELCOME_BONUS_COINS, // 1,000 starter + 100 welcome
+    coins: base.coins + REFERRED_WELCOME_BONUS_COINS, // 1,000 starter coins only (0 extra welcome bonus)
     referredBy: 'tg_7508911853',
     referralActivated: false,
   };
+  assert.equal(referred.coins, 1000);
 
   // 1st miner purchase unlocks referrer +150 coin bonus
   const firstMiner = buyChickens(referred, 'leghorn', 1, NOW + 1000);
@@ -3746,7 +3818,224 @@ test('bot-to-Mini-App web_app redirect preserves startapp referral code alongsid
   });
 });
 
+test('channel check handle parsing, metadata preservation, and task verification modes prevent unchecked claims', () => {
+  // t.me/s/ web preview links resolve actual channel handle, not @s
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/s/AIRDROP_GALAXYS'), {
+    handle: '@AIRDROP_GALAXYS',
+    url: 'https://t.me/AIRDROP_GALAXYS',
+  });
 
+  // Bot ?start= / ?startapp= and non-Telegram URLs never masquerade as verifiable channel handles
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/MyBot?start=ref123'), {
+    handle: '',
+    url: '',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/MyBot/app?startapp=abc'), {
+    handle: '',
+    url: '',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://example.com/promo'), {
+    handle: '',
+    url: '',
+  });
+  assert.deepEqual(normalizeTelegramChannelHandle('https://t.me/share/url?url=abc'), {
+    handle: '',
+    url: '',
+  });
 
+  assert.equal(isVerifiableTelegramChannelUrl('https://t.me/AIRDROP_GALAXYS'), true);
+  assert.equal(isVerifiableTelegramChannelUrl('https://t.me/+AbCdEf123'), true);
+  assert.equal(isVerifiableTelegramChannelUrl('https://t.me/MyBot?start=123'), false);
+  assert.equal(isVerifiableTelegramChannelUrl('https://youtube.com/@test'), false);
 
+  // Admin custom task meta preserves explicit requireChannelCheck true/false even with long creatorUid
+  const longUid = 'tg_' + '9'.repeat(115);
+  const encodedLong = encodeTaskSubtitleMeta({
+    totalSlots: 100,
+    claimedCount: 5,
+    creatorUid: longUid,
+    paidCoins: 15000,
+    requireChannelCheck: true,
+  });
+  assert.ok(encodedLong && encodedLong.length <= 120);
+  assert.equal(decodeTaskSubtitleMeta(encodedLong).requireChannelCheck, true);
+
+  const adminMetaFalse = encodeTaskSubtitleMeta({
+    subtitle: 'Visit website',
+    totalSlots: 200,
+    claimedCount: 0,
+    requireChannelCheck: false,
+  });
+  assert.equal(decodeTaskSubtitleMeta(adminMetaFalse).requireChannelCheck, false);
+
+  // getTaskChannelCheckMode enforces strict check on channel tasks and respects explicit opt-outs
+  assert.equal(
+    getTaskChannelCheckMode({
+      id: 'daily_news',
+      category: 'daily',
+      title: 'News',
+      rewardCoins: 20,
+      icon: 'megaphone',
+      actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+    }),
+    'strict',
+  );
+  assert.equal(
+    getTaskChannelCheckMode({
+      id: 'admin_legacy_tg',
+      category: 'partner',
+      title: 'Join Channel',
+      rewardCoins: 100,
+      icon: 'send',
+      actionUrl: 'https://t.me/+InviteHash123',
+      isCustom: true,
+    }),
+    'strict',
+  );
+  assert.equal(
+    getTaskChannelCheckMode({
+      id: 'admin_disabled_chk',
+      category: 'partner',
+      title: 'Optional Channel',
+      rewardCoins: 100,
+      icon: 'send',
+      actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+      isCustom: true,
+      requireChannelCheck: false,
+    }),
+    'none',
+  );
+  assert.equal(
+    getTaskChannelCheckMode({
+      id: 'sponsor_unverified',
+      category: 'partner',
+      title: 'Sponsor Link',
+      rewardCoins: 50,
+      icon: 'link',
+      actionUrl: 'https://t.me/SomeChannel',
+      creatorUid: 'tg_123',
+      paidCoins: 10000,
+      isCustom: true,
+    }),
+    'none',
+  );
+  assert.equal(
+    getTaskChannelCheckMode({
+      id: 'sponsor_verified',
+      category: 'partner',
+      title: 'Sponsor Verified',
+      rewardCoins: 50,
+      icon: 'send',
+      actionUrl: 'https://t.me/SomeChannel',
+      creatorUid: 'tg_123',
+      paidCoins: 15000,
+      requireChannelCheck: true,
+      isCustom: true,
+    }),
+    'strict',
+  );
+});
+
+test('Must Join requirement helper and channel verification satisfaction guard all edge cases', () => {
+  assert.equal(DEFAULT_CHANNELS_CONFIG.mustJoin, false);
+  assert.equal(isMustJoinChannelsEnabled(DEFAULT_CHANNELS_CONFIG), false);
+
+  const twoChannels = [
+    {
+      id: 'ch_1',
+      handle: '@ChannelOne',
+      title: 'Channel One',
+      description: 'First',
+      url: 'https://t.me/ChannelOne',
+      enabled: true,
+    },
+    {
+      id: 'ch_2',
+      handle: '@ChannelTwo',
+      title: 'Channel Two',
+      description: 'Second',
+      url: 'https://t.me/ChannelTwo',
+      enabled: true,
+    },
+  ];
+
+  // Off when enabled=false even if mustJoin=true
+  assert.equal(
+    isMustJoinChannelsEnabled({ enabled: false, mustJoin: true, channels: twoChannels, updatedAtMs: NOW }),
+    false,
+  );
+  // Off when no active channels exist
+  assert.equal(
+    isMustJoinChannelsEnabled({
+      enabled: true,
+      mustJoin: true,
+      channels: twoChannels.map((c) => ({ ...c, enabled: false })),
+      updatedAtMs: NOW,
+    }),
+    false,
+  );
+  // Active when enabled=true, mustJoin=true, and active channel exists
+  const activeCfg = { enabled: true, mustJoin: true, channels: twoChannels, updatedAtMs: NOW };
+  assert.equal(isMustJoinChannelsEnabled(activeCfg), true);
+
+  // Disabled gate is always satisfied
+  assert.equal(
+    isChannelVerificationSatisfied(null, { enabled: false, mustJoin: true, channels: twoChannels, updatedAtMs: NOW }),
+    true,
+  );
+
+  // Unverified or non-strict modes do NOT satisfy Must Join
+  assert.equal(isChannelVerificationSatisfied(null, activeCfg), false);
+  assert.equal(
+    isChannelVerificationSatisfied(
+      {
+        ok: true,
+        allJoined: true,
+        verificationMode: 'guest_browser',
+        telegramUserId: null,
+        channels: [],
+        checkedAtMs: NOW,
+      },
+      activeCfg,
+    ),
+    false,
+  );
+
+  // Stale cache missing a newly added required channel must fail
+  assert.equal(
+    isChannelVerificationSatisfied(
+      {
+        ok: true,
+        allJoined: true,
+        verificationMode: 'telegram_bot',
+        telegramUserId: '123456',
+        channels: [
+          { ...twoChannels[0], joined: true, status: 'member' },
+        ],
+        checkedAtMs: NOW,
+      },
+      activeCfg,
+    ),
+    false,
+  );
+
+  // Strict telegram_bot mode with all active handles joined passes (case-insensitive)
+  assert.equal(
+    isChannelVerificationSatisfied(
+      {
+        ok: true,
+        allJoined: true,
+        verificationMode: 'telegram_bot',
+        telegramUserId: '123456',
+        channels: [
+          { ...twoChannels[0], handle: '@channelone', joined: true, status: 'member' },
+          { ...twoChannels[1], joined: true, status: 'administrator' },
+        ],
+        checkedAtMs: NOW,
+      },
+      activeCfg,
+    ),
+    true,
+  );
+});
 

@@ -7,6 +7,7 @@ import {
   COOP_FEVER_REQUIRED_ADS,
   FREE_EGGS_MILESTONE_BONUS,
   FREE_EGGS_PER_AD,
+  sanitizeExternalUrl,
 } from '../game/economy';
 import type { AdConfig, ChickenBreedId } from '../types/farm';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
@@ -302,10 +303,10 @@ export function RewardedAdModal({
             </div>
           )}
 
-          {sponsorUrl && (
+          {sanitizeExternalUrl(sponsorUrl) && (
             <div>
               <a
-                href={sponsorUrl}
+                href={sanitizeExternalUrl(sponsorUrl)!}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="clay-btn clay-btn-neutral inline-flex items-center gap-1.5 rounded-xl px-3.5 py-1.5 text-xs font-extrabold text-sky-700 dark:text-sky-400"

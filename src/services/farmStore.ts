@@ -47,6 +47,7 @@ import {
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_ECONOMY_CONFIG,
   DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
@@ -66,8 +67,8 @@ import {
   normalizePlayerBanId,
   normalizeTelegramChannelEntry,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
-  REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
+  resolveEconomyConfig,
   resolveMaintenanceConfig,
   resolveTaskPricingConfig,
   SIGNUP_BONUS_COINS,
@@ -86,6 +87,7 @@ import type {
   ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
+  EconomyConfig,
   LeaderboardEntry,
   MaintenanceConfig,
   PromoRewardType,
@@ -109,6 +111,17 @@ const PLAYER_ID_COOKIE = 'chickenland_uid_v1';
 const PROFILE_CACHE_PREFIX = 'chickenland_profile_cache_v1_';
 const GOLDEN_EGG_CLAIM_CACHE_PREFIX = 'chickenland_golden_egg_at_v1_';
 const BAN_CACHE_PREFIX = 'chickenland_ban_cache_v1_';
+
+let cachedLiveEconomyConfig: EconomyConfig = DEFAULT_ECONOMY_CONFIG;
+
+export function getCachedLiveEconomyConfig(): EconomyConfig {
+  return cachedLiveEconomyConfig;
+}
+
+export function setCachedLiveEconomyConfig(next: Partial<EconomyConfig> | null | undefined): EconomyConfig {
+  cachedLiveEconomyConfig = resolveEconomyConfig(next);
+  return cachedLiveEconomyConfig;
+}
 
 function readCookiePlayerId(): string {
   try {
@@ -596,10 +609,11 @@ export async function ensurePlayerInFirestore(
 export async function applyReferralCodeInFirestore(
   currentProfile: UserFarmProfile,
   rawCodeOrId: string,
+  perReferRewardCoinsOverride?: number,
 ): Promise<
   | {
       profile: UserFarmProfile;
-      transaction: TransactionEntry;
+      transaction?: TransactionEntry;
       referrerUid: string;
       referrerName: string;
       coinsRewarded: number;
@@ -739,7 +753,10 @@ export async function applyReferralCodeInFirestore(
     });
 
     const nowMs = Date.now();
-    const rewardCoins = REFERRER_SIGNUP_BONUS_COINS;
+    const rewardCoins =
+      typeof perReferRewardCoinsOverride === 'number' && Number.isFinite(perReferRewardCoinsOverride)
+        ? Math.max(0, Math.min(100_000, Math.round(perReferRewardCoinsOverride)))
+        : cachedLiveEconomyConfig.perReferRewardCoins;
     const playerRef = doc(db, 'players', currentProfile.uid);
     const playerLbRef = doc(db, 'leaderboard', currentProfile.uid);
     const referrerPlayerRef = doc(db, 'players', referrerUid);
@@ -750,19 +767,6 @@ export async function applyReferralCodeInFirestore(
       ...currentProfile,
       referredBy: referrerUid,
       referralActivated: calculateTotalChickens(currentProfile) > 0,
-      coins: currentProfile.coins + REFERRED_WELCOME_BONUS_COINS,
-    };
-
-    const userTx: TransactionEntry = {
-      id: `tx_ref_join_${nowMs}`,
-      userId: currentProfile.uid,
-      type: 'referral',
-      title: `Joined via ${referrerName}'s referral`,
-      amount: REFERRED_WELCOME_BONUS_COINS,
-      currency: 'coins',
-      usdValue: 0.01,
-      status: 'completed',
-      createdAtMs: nowMs,
     };
 
     let alreadyLinked = false;
@@ -796,14 +800,12 @@ export async function applyReferralCodeInFirestore(
       activatedOnLink = hasOwnedChicken;
 
       if (playerSnap.exists()) {
-        const liveCoins = Number(playerSnap.data().coins ?? currentProfile.coins);
         const { updatedProfile, firestorePayload } = buildUpdatedPlayerFromRaw(
           playerSnap.data(),
           currentProfile.uid,
           {
             referredBy: referrerUid,
             referralActivated: hasOwnedChicken,
-            coins: liveCoins + REFERRED_WELCOME_BONUS_COINS,
           },
         );
         nextProfile = updatedProfile;
@@ -824,24 +826,13 @@ export async function applyReferralCodeInFirestore(
       } else {
         transaction.set(playerLbRef, toLeaderboardPayload(nextProfile));
       }
-      transaction.set(doc(db, 'players', currentProfile.uid, 'transactions', userTx.id), {
-        userId: currentProfile.uid,
-        type: userTx.type,
-        title: userTx.title,
-        amount: userTx.amount,
-        currency: userTx.currency,
-        usdValue: userTx.usdValue,
-        status: userTx.status,
-        createdAtMs: userTx.createdAtMs,
-        createdAt: serverTimestamp(),
-      });
 
       const rawName = (nextProfile.displayName || currentProfile.displayName || '').trim();
       const safeReferredName = (rawName || `Farmer ${currentProfile.uid.slice(-4)}`).slice(0, 60);
       const rawHandle = formatReferralHandle(nextProfile.handle || currentProfile.handle, currentProfile.uid).trim();
       const safeReferredHandle = (rawHandle || `@farmer_${currentProfile.uid.slice(-4)}`).slice(0, 40);
 
-      // Link immediately as 'pending'; +150 coin referrer reward unlocks when referred user buys their first hen (miner).
+      // Link immediately as 'pending'; verified refer coin bonus unlocks when referred user buys their first hen.
       // If user already owns a hen (delayed recovery), activate immediately.
       transaction.set(referralDocRef, {
         referrerUid,
@@ -914,7 +905,6 @@ export async function applyReferralCodeInFirestore(
     });
     return {
       profile: nextProfile,
-      transaction: userTx,
       referrerUid,
       referrerName,
       coinsRewarded: activatedOnLink ? rewardCoins : 0,
@@ -939,8 +929,8 @@ export async function commitPlayerMutation(params: {
   deposit?: DepositOrder;
   withdrawal?: WithdrawalOrder;
   referrerCommissionCoins?: number;
-  referralEggCommission?: number;
   activateReferral?: boolean;
+  perReferRewardCoins?: number;
 }): Promise<boolean> {
   const uid = params.profile.uid;
   saveCachedPlayerProfile(params.profile);
@@ -996,10 +986,14 @@ export async function commitPlayerMutation(params: {
           (!refSnap.exists() || refSnap.data().status === 'pending');
 
         if (shouldCreditReferrer) {
+          const perReferReward =
+            typeof params.perReferRewardCoins === 'number' && Number.isFinite(params.perReferRewardCoins)
+              ? Math.max(0, Math.min(100_000, Math.round(params.perReferRewardCoins)))
+              : cachedLiveEconomyConfig.perReferRewardCoins;
           const rp = referrerPlayerSnap.data();
-          const nextCoins = Number(rp.coins ?? 0) + REFERRER_SIGNUP_BONUS_COINS;
+          const nextCoins = Number(rp.coins ?? 0) + perReferReward;
           const nextRefCount = Number(rp.referralCount ?? 0) + 1;
-          const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + REFERRER_SIGNUP_BONUS_COINS;
+          const nextRefCoinsEarned = Number(rp.referralCoinsEarned ?? 0) + perReferReward;
           const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
             rp,
             refUid,
@@ -1013,7 +1007,7 @@ export async function commitPlayerMutation(params: {
           if (refSnap.exists()) {
             transaction.update(refDocRef, {
               status: 'active',
-              coinsEarned: Number(refSnap.data().coinsEarned ?? 0) + REFERRER_SIGNUP_BONUS_COINS,
+              coinsEarned: Number(refSnap.data().coinsEarned ?? 0) + perReferReward,
             });
           } else {
             const safeReferredName = (params.profile.displayName || `Farmer ${uid.slice(-4)}`).trim().slice(0, 60) || 'Farmer';
@@ -1024,7 +1018,7 @@ export async function commitPlayerMutation(params: {
               referredName: safeReferredName,
               referredHandle: safeReferredHandle,
               status: 'active',
-              coinsEarned: REFERRER_SIGNUP_BONUS_COINS,
+              coinsEarned: perReferReward,
               toppedUpUsd: 0,
               createdAtMs: nowMs,
               createdAt: serverTimestamp(),
@@ -1045,104 +1039,10 @@ export async function commitPlayerMutation(params: {
           transaction.set(doc(db, 'players', refUid, 'transactions', `tx_ref_earned_${uid}_${nowMs}`.slice(0, 64)), {
             userId: refUid,
             type: 'referral',
-            title: `Referral bonus (+${REFERRER_SIGNUP_BONUS_COINS} coins): ${params.profile.displayName}`.slice(0, 80),
-            amount: REFERRER_SIGNUP_BONUS_COINS,
+            title: `Referral bonus (+${perReferReward} coins): ${params.profile.displayName}`.slice(0, 80),
+            amount: perReferReward,
             currency: 'coins',
-            usdValue: Number((REFERRER_SIGNUP_BONUS_COINS / 10000).toFixed(4)),
-            status: 'completed',
-            createdAtMs: nowMs,
-            createdAt: serverTimestamp(),
-          });
-        }
-      });
-      return true;
-    } catch (error) {
-      handleFirestoreError(error, OperationType.WRITE, `players/${uid}`);
-    }
-  }
-
-  if (
-    params.referralEggCommission &&
-    params.referralEggCommission > 0 &&
-    params.profile.referredBy
-  ) {
-    const refUid = params.profile.referredBy;
-    const eggCommission = Math.max(1, Math.floor(params.referralEggCommission));
-    const txId = params.transaction?.id.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const nowMs = params.transaction?.createdAtMs ?? Date.now();
-    const playerRef = doc(db, 'players', uid);
-    const playerLbRef = doc(db, 'leaderboard', uid);
-    const referrerPlayerRef = doc(db, 'players', refUid);
-    const referrerLbRef = doc(db, 'leaderboard', refUid);
-
-    try {
-      await runTransaction(db, async (transaction) => {
-        const [referrerPlayerSnap, referrerLbSnap, playerSnap, playerLbSnap] = await Promise.all([
-          transaction.get(referrerPlayerRef),
-          transaction.get(referrerLbRef),
-          transaction.get(playerRef),
-          transaction.get(playerLbRef),
-        ]);
-
-        if (playerSnap.exists()) {
-          transaction.update(playerRef, toFirestoreProfilePayload(params.profile, false));
-        } else {
-          transaction.set(playerRef, toFirestoreProfilePayload(params.profile, true));
-        }
-        if (playerLbSnap.exists()) {
-          transaction.update(playerLbRef, buildUpdatedLeaderboardFromRaw(playerLbSnap.data(), params.profile));
-        } else {
-          transaction.set(playerLbRef, toLeaderboardPayload(params.profile));
-        }
-
-        if (params.transaction && txId) {
-          transaction.set(doc(db, 'players', uid, 'transactions', txId), {
-            userId: uid,
-            type: params.transaction.type,
-            title: params.transaction.title.slice(0, 80),
-            amount: params.transaction.amount,
-            currency: params.transaction.currency,
-            usdValue: params.transaction.usdValue,
-            status: params.transaction.status,
-            createdAtMs: params.transaction.createdAtMs,
-            createdAt: serverTimestamp(),
-          });
-        }
-
-        if (referrerPlayerSnap.exists()) {
-          const rp = referrerPlayerSnap.data();
-          const nextEggs = Number(rp.eggs ?? 0) + eggCommission;
-          const nextTotalEggs = Number(rp.totalEggsCollected ?? 0) + eggCommission;
-          const { updatedProfile: updatedReferrer, firestorePayload } = buildUpdatedPlayerFromRaw(
-            rp,
-            refUid,
-            {
-              eggs: nextEggs,
-              totalEggsCollected: nextTotalEggs,
-            },
-          );
-
-          transaction.update(referrerPlayerRef, firestorePayload);
-
-          if (referrerLbSnap.exists()) {
-            transaction.update(
-              referrerLbRef,
-              buildUpdatedLeaderboardFromRaw(referrerLbSnap.data(), updatedReferrer),
-            );
-          } else {
-            transaction.set(referrerLbRef, toLeaderboardPayload(updatedReferrer));
-          }
-
-          const refTxId = `tx_regg_${uid.replace(/[^a-zA-Z0-9_-]/g, '').slice(-12)}_${nowMs}`.slice(0, 64);
-          const refFriendHandle = formatReferralHandle(params.profile.handle, uid).slice(0, 32);
-          const refFriendName = (params.profile.displayName || 'Farmer').trim().slice(0, 30);
-          transaction.set(doc(db, 'players', refUid, 'transactions', refTxId), {
-            userId: refUid,
-            type: 'referral',
-            title: `5% eggs · ${refFriendHandle} (${refFriendName})`.slice(0, 80),
-            amount: eggCommission,
-            currency: 'eggs',
-            usdValue: eggsToUsd(eggCommission),
+            usdValue: Number((perReferReward / 10000).toFixed(4)),
             status: 'completed',
             createdAtMs: nowMs,
             createdAt: serverTimestamp(),
@@ -1354,10 +1254,6 @@ export async function commitPlayerMutation(params: {
         ? {
             referredBy: remoteReferredBy,
             referralActivated: Boolean(existingRaw.referralActivated ?? false),
-            coins: safeBoundedCoins(
-              params.profile.coins + REFERRED_WELCOME_BONUS_COINS,
-              params.profile.coins,
-            ),
           }
         : {}),
     };
@@ -1996,7 +1892,11 @@ function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinit
   const paidCoins =
     d.paidCoins !== undefined ? Number(d.paidCoins) : decoded.paidCoins;
   const requireChannelCheck =
-    d.requireChannelCheck === true || decoded.requireChannelCheck === true;
+    d.requireChannelCheck === true || decoded.requireChannelCheck === true
+      ? true
+      : d.requireChannelCheck === false || decoded.requireChannelCheck === false
+        ? false
+        : undefined;
 
   return {
     id,
@@ -2010,7 +1910,7 @@ function parseCustomTaskDoc(id: string, d: Record<string, unknown>): TaskDefinit
     claimedCount,
     ...(creatorUid ? { creatorUid } : {}),
     ...(paidCoins !== undefined ? { paidCoins } : {}),
-    ...(requireChannelCheck ? { requireChannelCheck: true } : {}),
+    ...(requireChannelCheck !== undefined ? { requireChannelCheck } : {}),
     isCustom: true,
     isActive: d.isActive !== false,
     createdAtMs: Number(d.createdAtMs ?? 0),
@@ -2056,6 +1956,7 @@ export async function createCustomTaskInFirestore(input: {
   icon: string;
   actionUrl: string;
   totalSlots?: number;
+  requireChannelCheck?: boolean;
 }): Promise<TaskDefinition> {
   const nowMs = Date.now();
   const rand = Math.random().toString(36).slice(2, 6);
@@ -2070,6 +1971,9 @@ export async function createCustomTaskInFirestore(input: {
     subtitle: displaySubtitle,
     totalSlots: cleanTotalSlots,
     claimedCount: 0,
+    ...(input.requireChannelCheck !== undefined
+      ? { requireChannelCheck: input.requireChannelCheck }
+      : {}),
   });
 
   try {
@@ -2095,6 +1999,9 @@ export async function createCustomTaskInFirestore(input: {
       actionUrl: cleanUrl,
       totalSlots: cleanTotalSlots,
       claimedCount: 0,
+      ...(input.requireChannelCheck !== undefined
+        ? { requireChannelCheck: input.requireChannelCheck }
+        : {}),
       isCustom: true,
       isActive: true,
       createdAtMs: nowMs,
@@ -2807,6 +2714,7 @@ export function subscribeToChannelsConfig(
 
       onUpdate({
         enabled: d.enabled !== false,
+        mustJoin: d.mustJoin === true,
         channels: parsedChannels,
         getCodeChannelUrl:
           typeof d.getCodeChannelUrl === 'string' && d.getCodeChannelUrl.trim()
@@ -2832,6 +2740,7 @@ export async function saveChannelsConfigInFirestore(
 
   const payload: ChannelsConfig = {
     enabled: Boolean(config.enabled),
+    mustJoin: Boolean(config.mustJoin),
     channels: normalizedChannels,
     getCodeChannelUrl: rawGetCode,
     updatedAtMs: nowMs,
@@ -2839,6 +2748,7 @@ export async function saveChannelsConfigInFirestore(
 
   const writeDoc: Record<string, unknown> = {
     enabled: payload.enabled,
+    mustJoin: Boolean(payload.mustJoin),
     channels: payload.channels,
     updatedAtMs: payload.updatedAtMs,
     updatedAt: serverTimestamp(),
@@ -3845,7 +3755,7 @@ export async function adminAddReferralRelationInFirestore(params: {
   const referredUid = referredResolved.uid;
   const rewardCoins = Math.max(
     0,
-    Math.min(100_000, Math.round(params.bonusCoins ?? REFERRER_SIGNUP_BONUS_COINS)),
+    Math.min(100_000, Math.round(params.bonusCoins ?? cachedLiveEconomyConfig.perReferRewardCoins)),
   );
   const nowMs = Date.now();
 
@@ -4172,6 +4082,50 @@ export async function saveTaskPricingConfigInFirestore(
   }
 }
 
+export function subscribeToEconomyConfig(
+  onUpdate: (economy: EconomyConfig) => void,
+): () => void {
+  return onSnapshot(
+    doc(db, 'app_config', 'economy'),
+    (snap) => {
+      if (!snap.exists()) {
+        cachedLiveEconomyConfig = DEFAULT_ECONOMY_CONFIG;
+        onUpdate(DEFAULT_ECONOMY_CONFIG);
+        return;
+      }
+      const d = snap.data();
+      const resolved = resolveEconomyConfig({
+        minWithdrawEggs: Number(d.minWithdrawEggs),
+        perReferRewardCoins: Number(d.perReferRewardCoins),
+        updatedAtMs: Number(d.updatedAtMs ?? 0),
+      });
+      cachedLiveEconomyConfig = resolved;
+      onUpdate(resolved);
+    },
+    (err) => logSubscriptionError('app_config/economy', err),
+  );
+}
+
+export async function saveEconomyConfigInFirestore(
+  input: Omit<EconomyConfig, 'updatedAtMs'>,
+): Promise<EconomyConfig> {
+  const nowMs = Date.now();
+  const payload = resolveEconomyConfig({
+    ...input,
+    updatedAtMs: nowMs,
+  });
+  cachedLiveEconomyConfig = payload;
+  try {
+    await setDoc(doc(db, 'app_config', 'economy'), {
+      ...payload,
+      updatedAt: serverTimestamp(),
+    });
+    return payload;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, 'app_config/economy');
+  }
+}
+
 export const MAINTENANCE_PROFILE_DOC_ID = 'sys_maintenance_cfg';
 export const SYSTEM_RESET_PROFILE_DOC_ID = 'sys_system_reset';
 
@@ -4435,6 +4389,10 @@ export async function executeDataResetInFirestore(
   summary: string;
 }> {
   const nowMs = Date.now();
+  const softDeadlineMs = nowMs + 16_000;
+  const isTimedOut = () => Date.now() >= softDeadlineMs;
+  const remainingBudgetMs = (capMs: number) =>
+    Math.max(0, Math.min(capMs, softDeadlineMs - Date.now()));
   const resetTokens = encodeAchievementsWithAds([], 0, { resetEpochMs: nowMs });
   let playersResetCount = 0;
   let referralsDeletedCount = 0;
@@ -4443,28 +4401,63 @@ export async function executeDataResetInFirestore(
   let bansDeletedCount = 0;
   let withdrawalsRejectedCount = 0;
 
-  const getDocsSafe = async (q: Query<DocumentData>, timeoutMs = 10_000): Promise<QuerySnapshot<DocumentData> | null> => {
+  const rejectOnTimeout = <T>(promise: Promise<T>, ms: number): Promise<T> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    return Promise.race([
+      promise.finally(() => {
+        if (timer !== undefined) clearTimeout(timer);
+      }),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error('Reset step timed out')), ms);
+      }),
+    ]);
+  };
+
+  const getDocsSafe = async (q: Query<DocumentData>, timeoutMs = 5_000): Promise<QuerySnapshot<DocumentData> | null> => {
+    const budget = remainingBudgetMs(timeoutMs);
+    if (budget < 350) return null;
     return await withResetTimeout<QuerySnapshot<DocumentData> | null>(
       getDocsFromServer(q).catch(() => getDocs(q)),
-      timeoutMs,
+      budget,
       null,
     );
   };
 
-  const runConcurrent = async <T>(
+  const commitChunkedOps = async <T>(
     items: readonly T[],
-    concurrency: number,
-    worker: (item: T) => Promise<void>,
-  ): Promise<void> => {
-    for (let i = 0; i < items.length; i += concurrency) {
-      await Promise.allSettled(items.slice(i, i + concurrency).map((item) => worker(item)));
+    chunkSize: number,
+    applyOp: (batch: ReturnType<typeof writeBatch>, item: T) => void,
+    fallbackOp: (item: T) => Promise<unknown>,
+  ): Promise<number> => {
+    let succeeded = 0;
+    for (let i = 0; i < items.length; i += chunkSize) {
+      if (isTimedOut()) break;
+      const slice = items.slice(i, i + chunkSize);
+      try {
+        const batch = writeBatch(db);
+        for (const item of slice) {
+          applyOp(batch, item);
+        }
+        const batchTimeout = Math.max(2_500, remainingBudgetMs(6_000));
+        await rejectOnTimeout(batch.commit(), batchTimeout);
+        succeeded += slice.length;
+      } catch {
+        if (isTimedOut()) break;
+        const fallbackTimeout = Math.max(1_500, remainingBudgetMs(3_500));
+        const settled = await Promise.allSettled(
+          slice.map((item) => rejectOnTimeout(fallbackOp(item), fallbackTimeout)),
+        );
+        succeeded += settled.filter((r) => r.status === 'fulfilled').length;
+      }
     }
+    return succeeded;
   };
 
   const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
     let removed = 0;
     let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 20; page++) {
+    for (let page = 0; page < 40; page++) {
+      if (isTimedOut()) break;
       const colQ: Query<DocumentData> = lastCursor
         ? query(
             collection(db, colName),
@@ -4473,16 +4466,14 @@ export async function executeDataResetInFirestore(
             limit(pageSize),
           )
         : query(collection(db, colName), orderBy('__name__'), limit(pageSize));
-      const snap = await getDocsSafe(colQ, 8_000);
+      const snap = await getDocsSafe(colQ, 5_000);
       if (!snap || snap.empty) break;
-      await runConcurrent(snap.docs, 20, async (d) => {
-        try {
-          await withResetTimeout(deleteDoc(d.ref), 5_000, undefined);
-          removed += 1;
-        } catch {
-          // Skip docs that fail rule validation
-        }
-      });
+      removed += await commitChunkedOps(
+        snap.docs,
+        400,
+        (b, d) => b.delete(d.ref),
+        (d) => deleteDoc(d.ref),
+      );
       lastCursor = snap.docs[snap.docs.length - 1];
       if (snap.size < pageSize) break;
     }
@@ -4501,35 +4492,40 @@ export async function executeDataResetInFirestore(
     bansDeletedCount = delBans;
 
     onProgress?.('Closing pending withdrawal requests...');
-    for (let page = 0; page < 10; page++) {
+    const pendingWdUids = new Set<string>();
+    for (let page = 0; page < 20; page++) {
+      if (isTimedOut()) break;
       const wdSnap = await getDocsSafe(
         query(collection(db, 'withdraw_requests'), where('status', '==', 'pending'), limit(100)),
-        8_000,
+        5_000,
       );
       if (!wdSnap || wdSnap.empty) break;
-      await runConcurrent(wdSnap.docs, 20, async (d) => {
-        try {
-          await withResetTimeout(
-            updateDoc(d.ref, {
-              status: 'rejected',
-              adminNote: 'System reset by Admin',
-              reviewedAtMs: nowMs,
-              updatedAt: serverTimestamp(),
-            }),
-            5_000,
-            undefined,
-          );
-          withdrawalsRejectedCount += 1;
-        } catch {
-          // Best-effort
-        }
-      });
-      if (wdSnap.size < 100) break;
+      for (const d of wdSnap.docs) {
+        const uidVal = String(d.data()?.userId || '').trim();
+        if (uidVal) pendingWdUids.add(uidVal);
+      }
+      const wdPatch = {
+        status: 'rejected',
+        adminNote: 'System reset by Admin',
+        reviewedAtMs: nowMs,
+        updatedAt: serverTimestamp(),
+      };
+      const closed = await commitChunkedOps(
+        wdSnap.docs,
+        200,
+        (b, d) => b.update(d.ref, wdPatch),
+        (d) => updateDoc(d.ref, wdPatch),
+      );
+      withdrawalsRejectedCount += closed;
+      if (wdSnap.size < 100 || closed === 0) break;
     }
 
-    onProgress?.('Resetting player farms & referrals...');
+    onProgress?.('Resetting player farms...');
+    const playersNeedingRefClean: string[] = [];
+    const playersNeedingWdClean: string[] = [];
     let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 50; page++) {
+    for (let page = 0; page < 100; page++) {
+      if (isTimedOut()) break;
       const pQ: Query<DocumentData> = lastPlayerCursor
         ? query(
             collection(db, 'players'),
@@ -4538,89 +4534,25 @@ export async function executeDataResetInFirestore(
             limit(50),
           )
         : query(collection(db, 'players'), orderBy('__name__'), limit(50));
-      const pSnap = await getDocsSafe(pQ, 10_000);
+      const pSnap = await getDocsSafe(pQ, 5_000);
       if (!pSnap || pSnap.empty) break;
 
       const playerDocs = pSnap.docs.filter((d) => !isReservedSystemPlayerDocId(d.id));
-      await runConcurrent(playerDocs, 10, async (d) => {
-        const cleanReferrals = async () => {
-          let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-          for (let rPage = 0; rPage < 15; rPage++) {
-            const rQ: Query<DocumentData> = lastRefCursor
-              ? query(
-                  collection(db, 'players', d.id, 'referrals'),
-                  orderBy('__name__'),
-                  startAfter(lastRefCursor),
-                  limit(50),
-                )
-              : query(collection(db, 'players', d.id, 'referrals'), orderBy('__name__'), limit(50));
-            const refSnap = await getDocsSafe(rQ, 6_000);
-            if (!refSnap || refSnap.empty) break;
-            await runConcurrent(refSnap.docs, 15, async (rDoc) => {
-              try {
-                await withResetTimeout(deleteDoc(rDoc.ref), 4_000, undefined);
-                referralsDeletedCount += 1;
-              } catch {
-                // Best-effort
-              }
-            });
-            lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
-            if (refSnap.size < 50) break;
-          }
-        };
+      for (const d of playerDocs) {
+        const pd = d.data();
+        if (
+          Number(pd.referralCount ?? 0) > 0 ||
+          Boolean(pd.referredBy) ||
+          Number(pd.referralCoinsEarned ?? 0) > 0
+        ) {
+          playersNeedingRefClean.push(d.id);
+        }
+        if (pendingWdUids.has(d.id) || Number(pd.totalWithdrawnUsd ?? 0) > 0) {
+          playersNeedingWdClean.push(d.id);
+        }
+      }
 
-        const rejectWithdrawals = async () => {
-          const uWdSnap = await getDocsSafe(
-            query(
-              collection(db, 'players', d.id, 'withdrawals'),
-              where('status', 'in', ['pending', 'processing']),
-              limit(40),
-            ),
-            6_000,
-          );
-          if (!uWdSnap || uWdSnap.empty) return;
-          await runConcurrent(uWdSnap.docs, 10, async (wDoc) => {
-            try {
-              await withResetTimeout(
-                updateDoc(wDoc.ref, {
-                  status: 'rejected',
-                  adminNote: 'System reset by Admin',
-                  reviewedAtMs: nowMs,
-                }),
-                4_000,
-                undefined,
-              );
-            } catch {
-              // Best-effort
-            }
-          });
-        };
-
-        const rejectTransactions = async () => {
-          const uTxSnap = await getDocsSafe(
-            query(
-              collection(db, 'players', d.id, 'transactions'),
-              where('status', '==', 'pending'),
-              limit(60),
-            ),
-            6_000,
-          );
-          if (!uTxSnap || uTxSnap.empty) return;
-          await runConcurrent(uTxSnap.docs, 15, async (tDoc) => {
-            try {
-              await withResetTimeout(
-                updateDoc(tDoc.ref, { status: 'rejected' }),
-                4_000,
-                undefined,
-              );
-            } catch {
-              // Best-effort
-            }
-          });
-        };
-
-        await Promise.all([cleanReferrals(), rejectWithdrawals(), rejectTransactions()]);
-
+      const buildPlayerResetPayload = (d: QueryDocumentSnapshot<DocumentData>) => {
         const pd = d.data();
         const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
         const safeHandle = formatReferralHandle(String(pd.handle || ''), d.id).slice(0, 40) || '@farmer';
@@ -4628,63 +4560,61 @@ export async function executeDataResetInFirestore(
         const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
         const rawLang = String(pd.language || 'en').trim().slice(0, 16);
         const safeLang = rawLang.length >= 2 ? rawLang : 'en';
+        return {
+          displayName: safeName,
+          handle: safeHandle,
+          photoUrl: String(pd.photoUrl || '').slice(0, 512),
+          avatarColor: safeColor,
+          language: safeLang,
+          level: 1,
+          xp: 0,
+          coins: SIGNUP_BONUS_COINS,
+          eggs: 0,
+          totalEggsCollected: 0,
+          totalCashEarnedUsd: 0,
+          totalWithdrawnUsd: 0,
+          basketCapacity: 300,
+          basketTierHours: 8,
+          leghornCount: 0,
+          rhodeCount: 0,
+          orpingtonCount: 0,
+          australorpCount: 0,
+          boughtThisWeek: 0,
+          dailyStreak: 0,
+          lastDailyClaimDate: '',
+          completedTaskIds: [],
+          claimedPromoCodes: [],
+          watchedAdsCount: 0,
+          totalAdsWatched: 0,
+          referredBy: '',
+          referralActivated: false,
+          referralCount: 0,
+          referralCoinsEarned: 0,
+          firstDepositBonusUsed: false,
+          lastCollectedAt: nowMs,
+          feedBoostUntilMs: 0,
+          lastGoldenEggAtMs: 0,
+          goldenEggsFound: 0,
+          claimedAchievementIds: resetTokens,
+          claimedReferralMilestones: [],
+          updatedAt: serverTimestamp(),
+        };
+      };
 
-        try {
-          await withResetTimeout(
-            updateDoc(d.ref, {
-              displayName: safeName,
-              handle: safeHandle,
-              photoUrl: String(pd.photoUrl || '').slice(0, 512),
-              avatarColor: safeColor,
-              language: safeLang,
-              level: 1,
-              xp: 0,
-              coins: SIGNUP_BONUS_COINS,
-              eggs: 0,
-              totalEggsCollected: 0,
-              totalCashEarnedUsd: 0,
-              totalWithdrawnUsd: 0,
-              basketCapacity: 300,
-              basketTierHours: 8,
-              leghornCount: 0,
-              rhodeCount: 0,
-              orpingtonCount: 0,
-              australorpCount: 0,
-              boughtThisWeek: 0,
-              dailyStreak: 0,
-              lastDailyClaimDate: '',
-              completedTaskIds: [],
-              claimedPromoCodes: [],
-              watchedAdsCount: 0,
-              totalAdsWatched: 0,
-              referredBy: '',
-              referralActivated: false,
-              referralCount: 0,
-              referralCoinsEarned: 0,
-              firstDepositBonusUsed: false,
-              lastCollectedAt: nowMs,
-              feedBoostUntilMs: 0,
-              lastGoldenEggAtMs: 0,
-              goldenEggsFound: 0,
-              claimedAchievementIds: resetTokens,
-              claimedReferralMilestones: [],
-              updatedAt: serverTimestamp(),
-            }),
-            6_000,
-            undefined,
-          );
-          playersResetCount += 1;
-        } catch {
-          // Best-effort on individual malformed legacy doc
-        }
-      });
+      playersResetCount += await commitChunkedOps(
+        playerDocs,
+        50,
+        (b, d) => b.update(d.ref, buildPlayerResetPayload(d)),
+        (d) => updateDoc(d.ref, buildPlayerResetPayload(d)),
+      );
       lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
       if (pSnap.size < 50) break;
     }
 
     onProgress?.('Resetting leaderboard scores...');
     let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-    for (let page = 0; page < 50; page++) {
+    for (let page = 0; page < 100; page++) {
+      if (isTimedOut()) break;
       const lbQ: Query<DocumentData> = lastLbCursor
         ? query(
             collection(db, 'leaderboard'),
@@ -4693,37 +4623,111 @@ export async function executeDataResetInFirestore(
             limit(50),
           )
         : query(collection(db, 'leaderboard'), orderBy('__name__'), limit(50));
-      const lbSnap = await getDocsSafe(lbQ, 8_000);
+      const lbSnap = await getDocsSafe(lbQ, 4_500);
       if (!lbSnap || lbSnap.empty) break;
       const lbDocs = lbSnap.docs.filter((d) => !isReservedSystemPlayerDocId(d.id));
-      await runConcurrent(lbDocs, 20, async (d) => {
-        try {
-          await withResetTimeout(
-            updateDoc(d.ref, {
-              buyerPoints: 0,
-              inviterCount: 0,
-              eggs: 0,
-              totalEggsCollected: 0,
-              chickensCount: 0,
-              updatedAt: serverTimestamp(),
-            }),
-            5_000,
-            undefined,
-          );
-        } catch {
-          // Best-effort
-        }
-      });
+      const lbResetPayload = {
+        buyerPoints: 0,
+        inviterCount: 0,
+        eggs: 0,
+        totalEggsCollected: 0,
+        chickensCount: 0,
+        updatedAt: serverTimestamp(),
+      };
+      await commitChunkedOps(
+        lbDocs,
+        50,
+        (b, d) => b.update(d.ref, lbResetPayload),
+        (d) => updateDoc(d.ref, lbResetPayload),
+      );
       lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
       if (lbSnap.size < 50) break;
+    }
+
+    onProgress?.('Clearing active referrals & player records...');
+    const cleanPlayerSubcollections = async (uid: string) => {
+      if (isTimedOut()) return;
+      if (playersNeedingRefClean.includes(uid)) {
+        let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+        for (let rPage = 0; rPage < 20; rPage++) {
+          if (isTimedOut()) break;
+          const rQ: Query<DocumentData> = lastRefCursor
+            ? query(
+                collection(db, 'players', uid, 'referrals'),
+                orderBy('__name__'),
+                startAfter(lastRefCursor),
+                limit(50),
+              )
+            : query(collection(db, 'players', uid, 'referrals'), orderBy('__name__'), limit(50));
+          const refSnap = await getDocsSafe(rQ, 3_500);
+          if (!refSnap || refSnap.empty) break;
+          referralsDeletedCount += await commitChunkedOps(
+            refSnap.docs,
+            50,
+            (b, rDoc) => b.delete(rDoc.ref),
+            (rDoc) => deleteDoc(rDoc.ref),
+          );
+          lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
+          if (refSnap.size < 50) break;
+        }
+      }
+      if (!isTimedOut() && playersNeedingWdClean.includes(uid)) {
+        const uWdSnap = await getDocsSafe(
+          query(
+            collection(db, 'players', uid, 'withdrawals'),
+            where('status', 'in', ['pending', 'processing']),
+            limit(40),
+          ),
+          3_500,
+        );
+        if (uWdSnap && !uWdSnap.empty) {
+          const patch = {
+            status: 'rejected',
+            adminNote: 'System reset by Admin',
+            reviewedAtMs: nowMs,
+          };
+          await commitChunkedOps(
+            uWdSnap.docs,
+            40,
+            (b, wDoc) => b.update(wDoc.ref, patch),
+            (wDoc) => updateDoc(wDoc.ref, patch),
+          );
+        }
+      }
+      if (!isTimedOut() && pendingWdUids.has(uid)) {
+        const uTxSnap = await getDocsSafe(
+          query(
+            collection(db, 'players', uid, 'transactions'),
+            where('status', '==', 'pending'),
+            limit(60),
+          ),
+          3_500,
+        );
+        if (uTxSnap && !uTxSnap.empty) {
+          await commitChunkedOps(
+            uTxSnap.docs,
+            60,
+            (b, tDoc) => b.update(tDoc.ref, { status: 'rejected' }),
+            (tDoc) => updateDoc(tDoc.ref, { status: 'rejected' }),
+          );
+        }
+      }
+    };
+
+    const uniqueSubUids = Array.from(
+      new Set([...playersNeedingRefClean, ...playersNeedingWdClean, ...pendingWdUids]),
+    );
+    for (let i = 0; i < uniqueSubUids.length; i += 10) {
+      if (isTimedOut()) break;
+      await Promise.allSettled(uniqueSubUids.slice(i, i + 10).map((u) => cleanPlayerSubcollections(u)));
     }
 
     onProgress?.('Updating global season & reset epoch...');
     let prevCount = 0;
     try {
       const [appSnap, mirrorSnap] = await Promise.all([
-        withResetTimeout(getDocFromServer(doc(db, 'app_config', 'system_reset')), 4_000, null),
-        withResetTimeout(getDocFromServer(doc(db, 'players', SYSTEM_RESET_PROFILE_DOC_ID)), 4_000, null),
+        withResetTimeout(getDocFromServer(doc(db, 'app_config', 'system_reset')), 3_000, null),
+        withResetTimeout(getDocFromServer(doc(db, 'players', SYSTEM_RESET_PROFILE_DOC_ID)), 3_000, null),
       ]);
       const appCount = appSnap?.exists()
         ? Math.max(0, Math.floor(Number(appSnap.data()?.resetCount ?? 0) || 0))
@@ -4739,22 +4743,8 @@ export async function executeDataResetInFirestore(
     const nextResetCount = prevCount + 1;
     const cleanAdminUid = String(adminUid || 'admin').slice(0, 64);
 
-    await withResetTimeout(
-      setDoc(doc(db, 'app_config', 'season'), {
-        seasonNumber: 1,
-        title: 'Harvest Cup Season 1',
-        prizePoolCoins: 25000,
-        endsAtMs: nowMs + 4 * 86_400_000,
-        lastWinners: [],
-        updatedAtMs: nowMs,
-        updatedAt: serverTimestamp(),
-      }),
-      6_000,
-      undefined,
-    ).catch(() => undefined);
-
     const [appEpochRes, mirrorEpochRes] = await Promise.allSettled([
-      withResetTimeout(
+      rejectOnTimeout(
         setDoc(doc(db, 'app_config', 'system_reset'), {
           resetEpochMs: nowMs,
           resetCount: nextResetCount,
@@ -4763,9 +4753,8 @@ export async function executeDataResetInFirestore(
           updatedAt: serverTimestamp(),
         }).then(() => true),
         6_000,
-        false,
       ),
-      withResetTimeout(
+      rejectOnTimeout(
         upsertReservedPlayerConfigDoc({
           docId: SYSTEM_RESET_PROFILE_DOC_ID,
           referralCode: '__RESET__',
@@ -4778,13 +4767,25 @@ export async function executeDataResetInFirestore(
           claimedAchievementIds: ['__sys_reset_v1__', String(nowMs)],
         }).then(() => true),
         6_000,
-        false,
       ),
+      withResetTimeout(
+        setDoc(doc(db, 'app_config', 'season'), {
+          seasonNumber: 1,
+          title: 'Harvest Cup Season 1',
+          prizePoolCoins: 25000,
+          endsAtMs: nowMs + 4 * 86_400_000,
+          lastWinners: [],
+          updatedAtMs: nowMs,
+          updatedAt: serverTimestamp(),
+        }),
+        6_000,
+        undefined,
+      ).catch(() => undefined),
     ]);
 
     const epochSaved =
-      (appEpochRes.status === 'fulfilled' && appEpochRes.value) ||
-      (mirrorEpochRes.status === 'fulfilled' && mirrorEpochRes.value);
+      (appEpochRes.status === 'fulfilled' && appEpochRes.value === true) ||
+      (mirrorEpochRes.status === 'fulfilled' && mirrorEpochRes.value === true);
     if (!epochSaved) {
       const reason =
         (appEpochRes.status === 'rejected' && appEpochRes.reason) ||

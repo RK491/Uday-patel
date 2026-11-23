@@ -8,11 +8,13 @@ import type {
   AutoHarvestDurationId,
   BannedUserRecord,
   ChannelsConfig,
+  ChannelVerificationResult,
   ChickenBreedId,
   ChickenPack,
   DepositNetwork,
   DepositOrder,
   DynamicPromoCode,
+  EconomyConfig,
   LeaderboardEntry,
   MaintenanceConfig,
   PromoRewardType,
@@ -49,23 +51,45 @@ export const REINVEST_BONUS_RATE = 0.05;
 export const CHANNEL_LEAVE_PENALTY_MULTIPLIER = 5;
 export const SIGNUP_BONUS_COINS = 1000;
 export const REFERRER_SIGNUP_BONUS_COINS = 150;
-export const REFERRER_SIGNUP_BONUS_EGGS = 500;
+export const REFERRER_SIGNUP_BONUS_EGGS = 0;
 export const REFERRAL_DEPOSIT_COMMISSION_RATE = 0.05;
-export const REFERRER_LIFETIME_EGG_COMMISSION_RATE = 0.05;
-export const REFERRED_WELCOME_BONUS_COINS = 100;
+export const REFERRER_LIFETIME_EGG_COMMISSION_RATE = 0;
+export const REFERRED_WELCOME_BONUS_COINS = 0;
+
+export const DEFAULT_ECONOMY_CONFIG: EconomyConfig = {
+  minWithdrawEggs: MIN_WITHDRAW_EGGS,
+  perReferRewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+  updatedAtMs: 0,
+};
+
+export function resolveEconomyConfig(
+  raw?: Partial<EconomyConfig> | null,
+): EconomyConfig {
+  const minW = Math.round(Number(raw?.minWithdrawEggs));
+  const perRef = Math.round(Number(raw?.perReferRewardCoins));
+  return {
+    minWithdrawEggs:
+      Number.isFinite(minW) && minW >= 1 && minW <= 1_000_000
+        ? minW
+        : DEFAULT_ECONOMY_CONFIG.minWithdrawEggs,
+    perReferRewardCoins:
+      Number.isFinite(perRef) && perRef >= 0 && perRef <= 100_000
+        ? perRef
+        : DEFAULT_ECONOMY_CONFIG.perReferRewardCoins,
+    updatedAtMs: Math.max(0, Math.floor(Number(raw?.updatedAtMs ?? 0) || 0)),
+  };
+}
 
 export function getTodayDateString(nowMs = Date.now()): string {
   return new Date(nowMs).toISOString().slice(0, 10);
 }
 
-export function calculateReferralEggCommission(collectedEggs: number): number {
-  const safe = Math.max(0, Math.floor(collectedEggs));
-  if (safe <= 0) return 0;
-  return Math.max(1, Math.round(safe * REFERRER_LIFETIME_EGG_COMMISSION_RATE));
+export function calculateReferralEggCommission(_collectedEggs: number): number {
+  return 0;
 }
 
-export function calculateReferralBonusEggs(coinsEarned: number): number {
-  return Math.max(0, Math.round(Math.max(0, coinsEarned) * 2.5));
+export function calculateReferralBonusEggs(_coinsEarned: number): number {
+  return 0;
 }
 
 export function summarizeReferrals(referrals: ReferralRecord[]): {
@@ -923,9 +947,7 @@ export function collectEggs(
     createdAtMs: nowMs,
   };
 
-  const referralEggCommission = profile.referredBy
-    ? calculateReferralEggCommission(collected)
-    : 0;
+  const referralEggCommission = 0;
 
   return { profile: nextProfile, transaction, collected, referralEggCommission };
 }
@@ -1229,7 +1251,12 @@ export function validateWithdrawalInput(
     Partial<Pick<UserFarmProfile, 'withdrawAdsWatched' | 'watchedAdsCount' | 'totalAdsWatched'>>,
   eggsAmount: number,
   walletAddress: string,
+  minWithdrawEggs = MIN_WITHDRAW_EGGS,
 ): string | null {
+  const effectiveMinEggs =
+    Number.isFinite(minWithdrawEggs) && Math.floor(minWithdrawEggs) >= 1
+      ? Math.min(1_000_000, Math.floor(minWithdrawEggs))
+      : MIN_WITHDRAW_EGGS;
   const adGate = getWithdrawAdGateStatus(profile);
   if (!adGate.unlocked) {
     return `Watch at least ${adGate.required} ads from the 3 Coin Ad buttons in Tasks before withdrawing (${adGate.watched}/${adGate.required} watched).`;
@@ -1238,8 +1265,8 @@ export function validateWithdrawalInput(
   if (trimmed.length < 6) {
     return 'Enter a valid TON wallet address (at least 6 characters, e.g. UQ...).';
   }
-  if (!Number.isFinite(eggsAmount) || Math.floor(eggsAmount) < MIN_WITHDRAW_EGGS) {
-    return `Minimum withdrawal is ${MIN_WITHDRAW_EGGS} eggs.`;
+  if (!Number.isFinite(eggsAmount) || Math.floor(eggsAmount) < effectiveMinEggs) {
+    return `Minimum withdrawal is ${effectiveMinEggs.toLocaleString()} eggs.`;
   }
   if (Math.floor(eggsAmount) > profile.eggs) {
     return 'Insufficient egg balance for this withdrawal.';
@@ -1253,6 +1280,7 @@ export function executeWithdrawal(
   walletAddress: string,
   memo: string,
   nowMs: number,
+  minWithdrawEggs = MIN_WITHDRAW_EGGS,
 ):
   | {
       profile: UserFarmProfile;
@@ -1262,7 +1290,7 @@ export function executeWithdrawal(
       remainingWithdrawAds: number;
     }
   | { error: string } {
-  const err = validateWithdrawalInput(profile, eggsAmount, walletAddress);
+  const err = validateWithdrawalInput(profile, eggsAmount, walletAddress, minWithdrawEggs);
   if (err) return { error: err };
 
   const safeEggs = Math.floor(eggsAmount);
@@ -1797,6 +1825,10 @@ export function createPaidTaskOrder(
   const cleanTitle = input.title.trim();
   if (cleanTitle.length < 2) {
     return { error: 'Enter a task title (at least 2 characters).' };
+  }
+  const trimmedActionUrl = String(input.actionUrl || '').trim();
+  if (trimmedActionUrl && !sanitizeExternalUrl(trimmedActionUrl)) {
+    return { error: 'Enter a valid http:// or https:// task link.' };
   }
   const rawReward = Math.floor(Number(input.rewardCoins) || 0);
   if (rawReward < USER_TASK_MIN_REWARD_COINS || rawReward > USER_TASK_MAX_REWARD_COINS) {
@@ -2818,56 +2850,19 @@ export interface ReferralMilestoneCrate {
   bonusLeghorns: number;
 }
 
-export const REFERRAL_MILESTONE_CRATES: ReferralMilestoneCrate[] = [
-  { targetActive: 3, title: 'Bronze Squad Crate', rewardCoins: 300, bonusLeghorns: 0 },
-  { targetActive: 10, title: 'Silver Flock Crate', rewardCoins: 1200, bonusLeghorns: 1 },
-  { targetActive: 25, title: 'Golden Tycoon Crate', rewardCoins: 3500, bonusLeghorns: 2 },
-];
+export const REFERRAL_MILESTONE_CRATES: ReferralMilestoneCrate[] = [];
 
 export function claimReferralMilestone(
-  profile: UserFarmProfile,
-  targetActive: number,
-  activeReferralCount: number,
-  nowMs: number,
+  _profile: UserFarmProfile,
+  _targetActive: number,
+  _activeReferralCount: number,
+  _nowMs: number,
 ):
   | { profile: UserFarmProfile; transaction: TransactionEntry; crate: ReferralMilestoneCrate }
   | { error: string } {
-  const crate = REFERRAL_MILESTONE_CRATES.find((c) => c.targetActive === targetActive);
-  if (!crate) {
-    return { error: 'Referral milestone crate not found.' };
-  }
-  const effectiveActive = Math.max(profile.referralCount, activeReferralCount);
-  if (effectiveActive < crate.targetActive) {
-    return { error: `Invite ${crate.targetActive - effectiveActive} more active friends to unlock.` };
-  }
-  const claimed = profile.claimedReferralMilestones ?? [];
-  if (claimed.includes(targetActive)) {
-    return { error: `${crate.title} already claimed.` };
-  }
-
-  const hadNoChickens = calculateTotalChickens(profile) === 0;
-  const nextProfile: UserFarmProfile = {
-    ...profile,
-    coins: profile.coins + crate.rewardCoins,
-    leghornCount: profile.leghornCount + crate.bonusLeghorns,
-    lastCollectedAt: hadNoChickens && crate.bonusLeghorns > 0 ? nowMs : profile.lastCollectedAt,
-    claimedReferralMilestones: [...claimed, targetActive].slice(-20),
+  return {
+    error: 'Referral rewards are +150 coins per verified refer & 5% lifetime deposit share only.',
   };
-
-  const bonusHenText = crate.bonusLeghorns > 0 ? ` + ${crate.bonusLeghorns} Leghorn` : '';
-  const transaction: TransactionEntry = {
-    id: `tx_refcrate_${targetActive}_${nowMs}`,
-    userId: profile.uid,
-    type: 'referral',
-    title: `${crate.title}${bonusHenText}`.slice(0, 80),
-    amount: crate.rewardCoins,
-    currency: 'coins',
-    usdValue: coinsToUsd(crate.rewardCoins),
-    status: 'completed',
-    createdAtMs: nowMs,
-  };
-
-  return { profile: nextProfile, transaction, crate };
 }
 
 export interface DailyEarningsChartPoint {
@@ -3209,24 +3204,38 @@ export function encodeTaskSubtitleMeta(input: TaskSubtitleMetaInput): string | u
   const claimedCount = Math.max(0, Math.floor(Number(input.claimedCount ?? 0) || 0));
   const creatorUid = (input.creatorUid || '').replace(/[:\n\r]/g, '').trim();
   const paidCoins = Math.max(0, Math.floor(Number(input.paidCoins ?? 0) || 0));
-  const requireChannelCheck = Boolean(input.requireChannelCheck);
+  const requireChannelCheckFlag =
+    input.requireChannelCheck === true
+      ? true
+      : input.requireChannelCheck === false
+        ? false
+        : undefined;
 
   const hasMeta =
-    totalSlots > 0 || Boolean(creatorUid) || paidCoins > 0 || requireChannelCheck;
+    totalSlots > 0 ||
+    Boolean(creatorUid) ||
+    paidCoins > 0 ||
+    requireChannelCheckFlag !== undefined;
   if (!hasMeta) {
     return cleanSub ? cleanSub.slice(0, TASK_SUBTITLE_MAX_LEN) : undefined;
   }
 
-  const suffix = requireChannelCheck
-    ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}:${paidCoins}:1`
-    : creatorUid || paidCoins > 0
-      ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}:${paidCoins}`
+  const tail =
+    requireChannelCheckFlag !== undefined
+      ? `:${paidCoins}:${requireChannelCheckFlag ? '1' : '0'}`
+      : paidCoins > 0
+        ? `:${paidCoins}`
+        : '';
+
+  const suffix =
+    requireChannelCheckFlag !== undefined || creatorUid || paidCoins > 0
+      ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid}${tail}`
       : `${TASK_META_PREFIX}${totalSlots}:${claimedCount}`;
 
-  if (suffix.length >= TASK_SUBTITLE_MAX_LEN) {
-    const compact = requireChannelCheck
-      ? `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 60)}:${paidCoins}:1`
-      : `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:${creatorUid.slice(0, 64)}`;
+  if (suffix.length > TASK_SUBTITLE_MAX_LEN) {
+    const fixedPrefix = `${TASK_META_PREFIX}${totalSlots}:${claimedCount}:`;
+    const maxUidLen = Math.max(0, TASK_SUBTITLE_MAX_LEN - fixedPrefix.length - tail.length);
+    const compact = `${fixedPrefix}${creatorUid.slice(0, maxUidLen)}${tail}`;
     return compact.slice(0, TASK_SUBTITLE_MAX_LEN);
   }
 
@@ -3258,7 +3267,8 @@ export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitl
   const creatorUid = match[3] ? match[3].trim() : undefined;
   const paidCoins =
     match[4] !== undefined ? Math.max(0, Math.floor(Number(match[4]) || 0)) : undefined;
-  const requireChannelCheck = match[5] === '1';
+  const requireChannelCheck =
+    match[5] === '1' ? true : match[5] === '0' ? false : undefined;
 
   return {
     ...(cleanSub ? { subtitle: cleanSub } : {}),
@@ -3266,7 +3276,7 @@ export function decodeTaskSubtitleMeta(rawSubtitle?: string): DecodedTaskSubtitl
     claimedCount,
     ...(creatorUid ? { creatorUid } : {}),
     ...(paidCoins !== undefined && paidCoins > 0 ? { paidCoins } : {}),
-    ...(requireChannelCheck ? { requireChannelCheck: true } : {}),
+    ...(requireChannelCheck !== undefined ? { requireChannelCheck } : {}),
   };
 }
 
@@ -3469,6 +3479,7 @@ export const DEFAULT_GET_CODE_CHANNEL_URL = 'https://t.me/AIRDROP_GALAXYS';
 
 export const DEFAULT_CHANNELS_CONFIG: ChannelsConfig = {
   enabled: true,
+  mustJoin: false,
   channels: REQUIRED_TELEGRAM_CHANNELS,
   getCodeChannelUrl: DEFAULT_GET_CODE_CHANNEL_URL,
   updatedAtMs: 0,
@@ -3487,12 +3498,34 @@ export function normalizeGetCodeChannelUrl(rawInput: string): string {
   return '';
 }
 
+const TELEGRAM_RESERVED_PATHS = new Set([
+  'share',
+  'proxy',
+  'socks',
+  'addstickers',
+  'addemoji',
+  'addlist',
+  'setlanguage',
+  'iv',
+  'bg',
+  'addtheme',
+  'boost',
+  'joinchat',
+  'c',
+  's',
+]);
+
 export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
   handle: string;
   url: string;
 } {
   const trimmed = String(rawHandleOrUrl || '').trim();
   if (!trimmed) {
+    return { handle: '', url: '' };
+  }
+
+  // Bot start / startapp deep links cannot be verified via getChatMember
+  if (/[?&]start(app)?=/i.test(trimmed)) {
     return { handle: '', url: '' };
   }
 
@@ -3518,24 +3551,46 @@ export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
     };
   }
 
-  const urlMatch = trimmed.match(
-    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})/i,
+  // Support Telegram web preview channel URLs: https://t.me/s/ChannelName
+  const previewMatch = trimmed.match(
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/s\/([a-zA-Z0-9_]{3,64})(?:[/?#]|$)/i,
   );
-  if (urlMatch) {
-    const slug = urlMatch[1];
+  if (previewMatch) {
+    const slug = previewMatch[1];
     return {
       handle: `@${slug}`,
       url: `https://t.me/${slug}`,
     };
   }
+
+  const urlMatch = trimmed.match(
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})(?:[/?#]|$)/i,
+  );
+  if (urlMatch) {
+    const slug = urlMatch[1];
+    if (TELEGRAM_RESERVED_PATHS.has(slug.toLowerCase())) {
+      return { handle: '', url: '' };
+    }
+    return {
+      handle: `@${slug}`,
+      url: `https://t.me/${slug}`,
+    };
+  }
+
   if (/^-?\d{5,20}$/.test(trimmed)) {
     return {
       handle: trimmed,
       url: '',
     };
   }
+
+  // Reject non-Telegram URLs/paths rather than stripping punctuation into fake handles
+  if (/^(?:https?:\/\/|tg:\/\/)/i.test(trimmed) || trimmed.includes('/') || trimmed.includes('.')) {
+    return { handle: '', url: '' };
+  }
+
   const cleanHandle = trimmed.replace(/^@+/, '').replace(/[^a-zA-Z0-9_]/g, '');
-  if (!cleanHandle) {
+  if (!cleanHandle || cleanHandle.length < 3) {
     return { handle: '', url: '' };
   }
   return {
@@ -3544,12 +3599,38 @@ export function normalizeTelegramChannelHandle(rawHandleOrUrl: string): {
   };
 }
 
+export type TaskChannelCheckMode = 'strict' | 'none';
+
+export function isVerifiableTelegramChannelUrl(rawUrl?: string): boolean {
+  const trimmed = String(rawUrl || '').trim();
+  if (!trimmed) return false;
+  if (/[?&]start(app)?=/i.test(trimmed)) return false;
+  if (
+    /^(?:https?:\/\/)?(?:t\.me|telegram\.me)\/(\+[a-zA-Z0-9_-]+|joinchat\/[a-zA-Z0-9_-]+)/i.test(
+      trimmed,
+    )
+  ) {
+    return true;
+  }
+  return Boolean(normalizeTelegramChannelHandle(trimmed).handle);
+}
+
+export function getTaskChannelCheckMode(task: TaskDefinition): TaskChannelCheckMode {
+  if (!task.actionUrl || !task.actionUrl.trim()) return 'none';
+  if (task.requireChannelCheck === true) return 'strict';
+  if (task.requireChannelCheck === false) return 'none';
+  const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
+  if (isPaidTask) return 'none';
+  return isVerifiableTelegramChannelUrl(task.actionUrl) ? 'strict' : 'none';
+}
+
 export function normalizeTelegramChannelEntry(
   input: Partial<RequiredTelegramChannel> & { handle?: string; url?: string },
   index = 0,
 ): RequiredTelegramChannel | null {
-  const normalized = normalizeTelegramChannelHandle(input.handle || input.url || '');
-  const handle = normalized.handle;
+  const rawChatId = String(input.chatId || '').trim().slice(0, 64);
+  const normalized = normalizeTelegramChannelHandle(input.handle || input.chatId || input.url || '');
+  const handle = normalized.handle || rawChatId;
   if (!handle || handle.length < 2) return null;
 
   const rawUrl = String(input.url || '').trim();
@@ -3569,7 +3650,7 @@ export function normalizeTelegramChannelEntry(
       .replace(/[^a-z0-9_-]/g, '_') ||
     `ch_${index + 1}`;
 
-  return {
+  const entry: RequiredTelegramChannel = {
     id: baseId.slice(0, 48),
     handle: handle.slice(0, 64),
     title: (String(input.title || '').trim() || handle).slice(0, 60),
@@ -3577,6 +3658,26 @@ export function normalizeTelegramChannelEntry(
     url: safeUrl,
     enabled: input.enabled !== false,
   };
+
+  const resolvedChatId =
+    rawChatId || (/^-?\d{5,20}$/.test(handle) ? handle : '');
+  if (resolvedChatId) {
+    entry.chatId = resolvedChatId;
+  }
+  if (typeof input.memberCount === 'number' && Number.isFinite(input.memberCount) && input.memberCount >= 0) {
+    entry.memberCount = Math.floor(input.memberCount);
+  }
+  if (typeof input.botIsAdmin === 'boolean') {
+    entry.botIsAdmin = input.botIsAdmin;
+  }
+  if (typeof input.botStatus === 'string' && input.botStatus.trim()) {
+    entry.botStatus = input.botStatus.trim().slice(0, 32);
+  }
+  if (typeof input.lastSyncedAtMs === 'number' && Number.isFinite(input.lastSyncedAtMs) && input.lastSyncedAtMs > 0) {
+    entry.lastSyncedAtMs = Math.floor(input.lastSyncedAtMs);
+  }
+
+  return entry;
 }
 
 export function getActiveRequiredChannels(
@@ -3589,6 +3690,39 @@ export function getActiveRequiredChannels(
   return source
     .filter((ch) => ch && ch.enabled !== false && Boolean(ch.handle))
     .slice(0, 10);
+}
+
+export function isMustJoinChannelsEnabled(config?: ChannelsConfig | null): boolean {
+  if (!config || config.enabled === false || config.mustJoin !== true) {
+    return false;
+  }
+  return getActiveRequiredChannels(config).length > 0;
+}
+
+export function isChannelVerificationSatisfied(
+  verification: ChannelVerificationResult | null | undefined,
+  config?: ChannelsConfig | null,
+): boolean {
+  const required = getActiveRequiredChannels(config);
+  if (config?.enabled === false || required.length === 0) {
+    return true;
+  }
+  if (!verification || !verification.allJoined) {
+    return false;
+  }
+  if (verification.verificationMode === 'disabled') {
+    return true;
+  }
+  if (verification.verificationMode !== 'telegram_bot') {
+    return false;
+  }
+  const verifiedHandles = new Set(
+    (verification.channels || [])
+      .filter((ch) => ch.joined)
+      .map((ch) => ch.handle.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return required.every((req) => verifiedHandles.has(req.handle.trim().toLowerCase()));
 }
 
 export function formatChannelsHandleSummary(
@@ -4164,6 +4298,7 @@ export function buildReferralBotNotificationMessage(params: {
   referredName?: string;
   referredHandle?: string;
   rewardCoins: number;
+  perReferRewardCoins?: number;
   depositGram?: string;
   depositUsd?: number;
   totalReferrals?: number;
@@ -4172,8 +4307,11 @@ export function buildReferralBotNotificationMessage(params: {
   const safeName = escapeTelegramHtml((params.referredName || 'New Farmer').trim().slice(0, 60));
   const safeHandle = escapeTelegramHtml(formatReferralHandle(params.referredHandle || '', '').slice(0, 40));
   const safeCoins = Math.max(0, Math.round(Number(params.rewardCoins) || 0));
+  const baseReferReward = Math.max(
+    0,
+    Math.round(Number(params.perReferRewardCoins ?? REFERRER_SIGNUP_BONUS_COINS) || 0),
+  );
   const pct = Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100);
-  const eggPct = Math.round(REFERRER_LIFETIME_EGG_COMMISSION_RATE * 100);
   const totalRefs =
     typeof params.totalReferrals === 'number' && Number.isFinite(params.totalReferrals)
       ? Math.max(1, Math.floor(params.totalReferrals))
@@ -4186,73 +4324,33 @@ export function buildReferralBotNotificationMessage(params: {
   if (params.event === 'deposit_commission') {
     const safeGram = escapeTelegramHtml((params.depositGram || '').trim().slice(0, 40));
     const safeUsd = Number(params.depositUsd || 0).toFixed(2);
-    const depositLine = safeGram
-      ? `💰 <b>Friend Deposit:</b> ${safeGram} (~$${safeUsd})`
-      : `💰 <b>Friend Deposit:</b> $${safeUsd}`;
-    const totalLine =
-      totalEarned !== null
-        ? `\n🏦 <b>Total Referral Earnings:</b> ${totalEarned.toLocaleString()} Coins`
-        : '';
-
+    const depositDetail = safeGram ? `${safeGram} (~$${safeUsd})` : `$${safeUsd}`;
     return [
-      '💎 <b>Referral Deposit Commission Received!</b>',
-      '',
-      `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
-      depositLine,
-      `🪙 <b>Your ${pct}% Commission Received:</b> +${safeCoins.toLocaleString()} Coins${totalLine}`,
-      '',
-      `Keep inviting friends to earn <b>+${REFERRER_SIGNUP_BONUS_COINS} Coins</b> per referral and a <b>${pct}% share</b> of every deposit they make!`,
+      `💎 <b>+${safeCoins.toLocaleString()} Coins Commission!</b>`,
+      `👤 ${safeName} (${safeHandle}) deposited <b>${depositDetail}</b>`,
+      `🪙 Your <b>${pct}%</b> share credited${totalEarned !== null ? ` · Total: <b>${totalEarned.toLocaleString()}c</b>` : ''}`,
     ].join('\n');
   }
 
   if (params.event === 'referral_pending') {
-    const pendingReward = safeCoins > 0 ? safeCoins : REFERRER_SIGNUP_BONUS_COINS;
+    const pendingReward = safeCoins > 0 ? safeCoins : baseReferReward;
     return [
-      '👋 <b>New Referral Received!</b>',
-      '',
-      `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
-      '🔗 <b>Status:</b> Link Clicked (Joined Farm)',
-      `⏳ <b>Pending Reward:</b> +${pendingReward.toLocaleString()} Coins`,
-      `🎁 <b>Friend Welcome Bonus:</b> +${REFERRED_WELCOME_BONUS_COINS} Coins`,
-      '',
-      `🐔 <b>When You Receive Your Reward:</b> As soon as ${safeName} buys their <b>1st Chicken (Miner)</b>, your <b>+${pendingReward.toLocaleString()} Coins</b> referral reward will be automatically unlocked &amp; credited!`,
-      '',
-      `💎 Plus you earn a lifetime <b>${pct}% Deposit Share</b> &amp; <b>${eggPct}% Egg Share</b> once active!`,
+      '👋 <b>New Referral Joined!</b>',
+      `👤 ${safeName} (${safeHandle})`,
+      `⏳ <b>+${pendingReward.toLocaleString()} Coins</b> unlock on their 1st hen (+<b>${pct}%</b> lifetime share)`,
     ].join('\n');
   }
 
-  const nextCrate =
-    totalRefs !== null
-      ? REFERRAL_MILESTONE_CRATES.find((c) => totalRefs < c.targetActive) ||
-        REFERRAL_MILESTONE_CRATES[REFERRAL_MILESTONE_CRATES.length - 1]
-      : REFERRAL_MILESTONE_CRATES[0];
-
-  const progressLines: string[] = [];
-  if (totalRefs !== null) {
-    const crateDetail =
-      nextCrate.bonusLeghorns > 0
-        ? `+${nextCrate.rewardCoins.toLocaleString()}c + ${nextCrate.bonusLeghorns} Hen`
-        : `+${nextCrate.rewardCoins.toLocaleString()}c`;
-    const crateLine =
-      totalRefs >= nextCrate.targetActive
-        ? `🏆 <b>${escapeTelegramHtml(nextCrate.title)} Unlocked!</b> Open Friends tab to claim <b>${crateDetail}</b>!`
-        : `🎯 <b>Next Crate (${escapeTelegramHtml(nextCrate.title)}):</b> ${totalRefs}/${nextCrate.targetActive} friends → <b>${crateDetail}</b>`;
-    progressLines.push(
-      `👥 <b>Total Friends Invited:</b> ${totalRefs}${totalEarned !== null ? ` · 🪙 <b>Total Earned:</b> ${totalEarned.toLocaleString()}c` : ''}`,
-      crateLine,
-    );
-  }
+  const statsParts: string[] = [];
+  if (totalRefs !== null) statsParts.push(`👥 ${totalRefs} friends`);
+  if (totalEarned !== null) statsParts.push(`🏦 ${totalEarned.toLocaleString()}c earned`);
+  statsParts.push(`💎 ${pct}% lifetime share`);
 
   return [
-    '🎉 <b>New Referral Received &amp; Reward Credited!</b>',
-    '',
-    `👤 <b>Referred User:</b> ${safeName} (${safeHandle})`,
-    `🪙 <b>Instant Reward Credited:</b> +${safeCoins.toLocaleString()} Coins`,
-    `🎁 <b>Friend Welcome Bonus:</b> +${REFERRED_WELCOME_BONUS_COINS} Coins`,
-    ...(progressLines.length > 0 ? ['', ...progressLines] : []),
-    '',
-    `💎 <b>${pct}% Deposit &amp; ${eggPct}% Lifetime Egg Share:</b>`,
-    `Whenever your referred user makes a deposit, you automatically receive a <b>${pct}% share</b> in Coins plus <b>${eggPct}% of their eggs</b>!`,
+    '🎉 <b>Referral Reward Credited!</b>',
+    `👤 ${safeName} (${safeHandle})`,
+    `🪙 <b>+${safeCoins.toLocaleString()} Coins</b> added to your wallet!`,
+    `✨ ${statsParts.join(' · ')}`,
   ].join('\n');
 }
 
@@ -4303,6 +4401,33 @@ export function shouldShowSignUpBonusClaim(params: {
   return isFreshAccount && hasNoProgress;
 }
 
+export function sanitizeExternalUrl(
+  rawUrl: unknown,
+  options?: { allowDeepLinks?: boolean; fallback?: string },
+): string {
+  const fallback = options?.fallback ?? '';
+  const trimmed = String(rawUrl || '')
+    .replace(/[\u0000-\u001F\u007F]+/g, '')
+    .trim()
+    .slice(0, 512);
+  if (!trimmed) return fallback;
+  const candidate =
+    trimmed.startsWith('t.me/') || trimmed.startsWith('www.') ? `https://${trimmed}` : trimmed;
+  try {
+    const parsed = new URL(candidate);
+    const proto = parsed.protocol.toLowerCase();
+    if (proto === 'https:' || proto === 'http:') {
+      return parsed.toString();
+    }
+    if (options?.allowDeepLinks && (proto === 'tg:' || proto === 'ton:')) {
+      return candidate;
+    }
+    return fallback;
+  } catch {
+    return fallback;
+  }
+}
+
 export const DEFAULT_WITHDRAW_APPROVE_MESSAGE_BODY = [
   '✅ Withdrawal Paid!',
   '',
@@ -4311,6 +4436,7 @@ export const DEFAULT_WITHDRAW_APPROVE_MESSAGE_BODY = [
   '💎 Amount: {gramAmount} GRAM',
   '🥚 Eggs: {eggsAmount}',
   '👛 Wallet: {walletShort}',
+  '🆔 Tx ID: {txId}',
   '⚡ Status: Confirmed on TON',
   '',
   'Thank you for using Alpha Gram 🐔💚',
@@ -4362,6 +4488,7 @@ export function renderWithdrawApproveMessage(params: {
       : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.buttonUrlTemplate;
 
   const cleanWallet = String(params.walletAddress || '').trim();
+  const cleanTxId = String(params.txId || '').trim().slice(0, 64);
   const cleanNote = String(params.adminNote || '').trim();
   const txUrlFromNote = /^https:\/\/[^\s]+$/i.test(cleanNote)
     ? cleanNote
@@ -4378,7 +4505,7 @@ export function renderWithdrawApproveMessage(params: {
     '{usdValue}': Math.max(0, Number(params.usdValue) || 0).toFixed(4),
     '{displayName}': String(params.displayName || 'Farmer').trim(),
     '{handle}': String(params.handle || '@farmer').trim(),
-    '{txId}': String(params.txId || '').trim(),
+    '{txId}': cleanTxId || 'N/A',
     '{memo}': String(params.memo || '').trim(),
     '{adminNote}': cleanNote,
     '{txUrl}': txUrlFromNote,
@@ -4406,7 +4533,7 @@ export function renderWithdrawApproveMessage(params: {
   buttonUrl = buttonUrl
     .split('{walletAddress}').join(encodedWallet)
     .split('{txUrl}').join(txUrlFromNote)
-    .split('{txId}').join(encodeURIComponent(String(params.txId || '').trim()));
+    .split('{txId}').join(encodeURIComponent(cleanTxId));
   if (!/^https:\/\/[^\s]+$/i.test(buttonUrl)) {
     buttonUrl = `https://tonviewer.com/${encodedWallet}`;
   }
@@ -4429,14 +4556,19 @@ export function renderPayoutChannelApproveMessage(params: {
   txId?: string;
   adminNote?: string;
   miniAppUrl?: string;
+  botUsername?: string;
 }): {
   plainText: string;
   htmlText: string;
   buttonText: string;
   buttonUrl: string;
+  botButtonText: string;
+  botButtonUrl: string;
+  inlineButtons: Array<Array<{ text: string; url: string }>>;
 } {
   const safeDisplayName = String(params.displayName || 'Farmer').trim().slice(0, 40) || 'Farmer';
   const shortWallet = formatShortTonWallet(params.walletAddress);
+  const cleanTxId = String(params.txId || '').trim().slice(0, 64);
   const safeNote = String(params.adminNote || '').trim();
   const hasPublicTxHash = /^[a-fA-F0-9]{64}$/.test(safeNote) || /^https:\/\/[^\s]+$/i.test(safeNote);
 
@@ -4449,7 +4581,7 @@ export function renderPayoutChannelApproveMessage(params: {
     usdValue: params.usdValue,
     displayName: safeDisplayName,
     handle: '',
-    txId: params.txId ? `...${String(params.txId).slice(-6)}` : '',
+    txId: cleanTxId,
     memo: '',
     adminNote: hasPublicTxHash ? safeNote : '',
   });
@@ -4462,13 +4594,28 @@ export function renderPayoutChannelApproveMessage(params: {
       : DEFAULT_WITHDRAW_APPROVE_TEMPLATE.messageTemplate;
   const includesUserIdentity = rawBody.includes('{displayName}');
   const includesAmount = rawBody.includes('{gramAmount}');
+  const includesTxId = !cleanTxId || rawBody.includes('{txId}');
 
   let finalPlain = rendered.plainText;
   let finalHtml = rendered.htmlText;
 
-  if (!includesUserIdentity || !includesAmount) {
-    const channelSummaryPlain = `👤 Farmer: ${safeDisplayName}\n💎 Withdrawn: ${cleanGram} GRAM`;
-    const channelSummaryHtml = `👤 <b>Farmer:</b> ${escapeTelegramHtml(safeDisplayName)}\n💎 <b>Withdrawn:</b> ${escapeTelegramHtml(cleanGram)} GRAM`;
+  if (!includesUserIdentity || !includesAmount || !includesTxId) {
+    const plainSummaryLines: string[] = [];
+    const htmlSummaryLines: string[] = [];
+    if (!includesUserIdentity) {
+      plainSummaryLines.push(`👤 Farmer: ${safeDisplayName}`);
+      htmlSummaryLines.push(`👤 <b>Farmer:</b> ${escapeTelegramHtml(safeDisplayName)}`);
+    }
+    if (!includesAmount) {
+      plainSummaryLines.push(`💎 Withdrawn: ${cleanGram} GRAM`);
+      htmlSummaryLines.push(`💎 <b>Withdrawn:</b> ${escapeTelegramHtml(cleanGram)} GRAM`);
+    }
+    if (!includesTxId && cleanTxId) {
+      plainSummaryLines.push(`🆔 Tx ID: ${cleanTxId}`);
+      htmlSummaryLines.push(`🆔 <b>Tx ID:</b> <code>${escapeTelegramHtml(cleanTxId)}</code>`);
+    }
+    const channelSummaryPlain = plainSummaryLines.join('\n');
+    const channelSummaryHtml = htmlSummaryLines.join('\n');
 
     const plainParts = finalPlain.split('\n');
     const htmlParts = finalHtml.split('\n');
@@ -4492,22 +4639,48 @@ export function renderPayoutChannelApproveMessage(params: {
     : /^https:\/\/[^\s]+$/i.test(safeNote)
       ? safeNote
       : '';
+
+  const rawBotParam = String(params.botUsername || '')
+    .trim()
+    .replace(/^@+/, '');
+  const cleanBotUsername = /^[a-zA-Z0-9_]{3,64}$/.test(rawBotParam)
+    ? rawBotParam
+    : '';
+  const sanitizedMiniAppUrl = params.miniAppUrl
+    ? sanitizeExternalUrl(params.miniAppUrl.trim().replace(/\/+$/, ''))
+    : '';
   const fallbackAppUrl =
-    params.miniAppUrl && /^https:\/\/[^\s]+$/i.test(params.miniAppUrl)
-      ? params.miniAppUrl
-      : '';
+    sanitizedMiniAppUrl && /^https:\/\/[^\s]+$/i.test(sanitizedMiniAppUrl)
+      ? sanitizedMiniAppUrl
+      : `https://t.me/${cleanBotUsername || 'AlphaGramAiBot'}`;
+  const urlBotMatch = fallbackAppUrl.match(/^https:\/\/(?:t\.me|telegram\.me)\/([a-zA-Z0-9_]{3,64})/i);
+  const displayBotUsername = cleanBotUsername || urlBotMatch?.[1] || 'AlphaGramAiBot';
+
+  finalPlain = `${finalPlain}\n\n🤖 Bot: @${displayBotUsername} (${fallbackAppUrl})`;
+  finalHtml = `${finalHtml}\n\n🤖 <b>Bot:</b> <a href="${escapeTelegramHtml(fallbackAppUrl)}">@${escapeTelegramHtml(displayBotUsername)} — Open Alpha Gram</a>`;
+
   const buttonUrl = safeTxUrl || fallbackAppUrl;
   const buttonText = safeTxUrl
     ? rendered.buttonText || '🔎 View transaction'
-    : fallbackAppUrl
-      ? '🐔 Open Alpha Gram'
-      : '';
+    : '🐔 Open Alpha Gram Bot';
+  const botButtonText = '🐔 Open Alpha Gram Bot';
+  const inlineRow: Array<{ text: string; url: string }> = [];
+  if (safeTxUrl) {
+    inlineRow.push({ text: rendered.buttonText || '🔎 View transaction', url: safeTxUrl });
+  }
+  inlineRow.push({
+    text: safeTxUrl ? '🐔 Open Bot' : '🐔 Open Alpha Gram Bot',
+    url: fallbackAppUrl,
+  });
 
   return {
     plainText: finalPlain.slice(0, 1500),
     htmlText: finalHtml.slice(0, 3500),
     buttonText,
     buttonUrl,
+    botButtonText,
+    botButtonUrl: fallbackAppUrl,
+    inlineButtons: inlineRow.length > 0 ? [inlineRow] : [],
   };
 }
 
@@ -4524,8 +4697,7 @@ export function getVerifiableClaimedChannelTasks(
   for (const task of allTasks) {
     if (!completedSet.has(task.id)) continue;
     if (!task.actionUrl) continue;
-    const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
-    if (isPaidTask && task.requireChannelCheck === false) continue;
+    if (getTaskChannelCheckMode(task) === 'none') continue;
     if (
       /[?&]start(app)?=/i.test(task.actionUrl) ||
       /t\.me\/(\+|joinchat\/)/i.test(task.actionUrl)

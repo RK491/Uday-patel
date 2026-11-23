@@ -285,6 +285,7 @@
       "type": "object",
       "properties": {
         "enabled": { "type": "boolean" },
+        "mustJoin": { "type": "boolean" },
         "channels": { "type": "array" },
         "getCodeChannelUrl": { "type": "string", "maxLength": 256 },
         "updatedAtMs": { "type": "number" },
@@ -388,6 +389,18 @@
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["enabled", "title", "message", "estimatedReturn", "updatedBy", "updatedAtMs", "updatedAt"]
+    },
+    "EconomyConfig": {
+      "title": "EconomyConfig",
+      "description": "Admin-editable minimum withdrawal eggs and per-referral reward coins synced across backend and clients.",
+      "type": "object",
+      "properties": {
+        "minWithdrawEggs": { "type": "number" },
+        "perReferRewardCoins": { "type": "number" },
+        "updatedAtMs": { "type": "number" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["minWithdrawEggs", "perReferRewardCoins", "updatedAtMs", "updatedAt"]
     }
   },
   "firestore": {
@@ -433,7 +446,7 @@
     },
     "/app_config/{configId}": {
       "schema": { "$ref": "#/entities/AdsConfig" },
-      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, payout DM template, paid task pricing, system reset epoch, and maintenance mode."
+      "description": "Global app configuration for ads, seasonal leaderboard, required Telegram channels, admins, payout DM template, paid task pricing, economy rules, system reset epoch, and maintenance mode."
     },
     "/banned_users/{playerId}": {
       "schema": { "$ref": "#/entities/BannedUser" },

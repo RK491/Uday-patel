@@ -25,11 +25,13 @@ import type {
   UserFarmProfile,
   WithdrawalOrder,
 } from '../types/farm';
+import { ChannelCheckCard } from './ChannelCheckPanel';
 import { EggIcon } from './GameIcons';
 
 interface WithdrawViewProps {
   profile: UserFarmProfile;
   withdrawals: WithdrawalOrder[];
+  minWithdrawEggs?: number;
   requiredChannels?: RequiredTelegramChannel[];
   channelsGateEnabled?: boolean;
   channelVerification?: ChannelVerificationResult | null;
@@ -45,6 +47,7 @@ interface WithdrawViewProps {
 export function WithdrawView({
   profile,
   withdrawals,
+  minWithdrawEggs = MIN_WITHDRAW_EGGS,
   requiredChannels,
   channelsGateEnabled = true,
   channelVerification = null,
@@ -56,15 +59,25 @@ export function WithdrawView({
   onGoToTasks,
   onConfirmWithdraw,
 }: WithdrawViewProps) {
+  const effectiveMinWithdraw = Math.max(1, Math.floor(Number(minWithdrawEggs) || MIN_WITHDRAW_EGGS));
   const [walletAddress, setWalletAddress] = useState('');
   const [showMemo, setShowMemo] = useState(false);
   const [memo, setMemo] = useState('');
   const [amountInput, setAmountInput] = useState(() =>
-    profile.eggs >= MIN_WITHDRAW_EGGS ? String(Math.min(profile.eggs, 100)) : '',
+    profile.eggs >= effectiveMinWithdraw ? String(Math.min(profile.eggs, effectiveMinWithdraw)) : '',
   );
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+
+  const activeRequiredChannels = (requiredChannels ?? []).filter(
+    (ch) => ch.enabled !== false && Boolean(ch.handle),
+  );
+  const showChannelGate = channelsGateEnabled && activeRequiredChannels.length > 0;
+  const channelGateBlocked =
+    showChannelGate &&
+    channelVerification?.verificationMode === 'telegram_bot' &&
+    !channelVerification.allJoined;
 
   const adGate = getWithdrawAdGateStatus(profile);
   const adGatePct = Math.min(100, Math.round((adGate.watched / adGate.required) * 100));
@@ -90,7 +103,11 @@ export function WithdrawView({
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setSuccessMsg(null);
-    const err = validateWithdrawalInput(profile, numericEggs, walletAddress);
+    if (channelGateBlocked) {
+      setErrorMsg('Join all required Telegram channels above and tap Check Channels to withdraw.');
+      return;
+    }
+    const err = validateWithdrawalInput(profile, numericEggs, walletAddress, effectiveMinWithdraw);
     if (err) {
       setErrorMsg(err);
       return;
@@ -101,7 +118,7 @@ export function WithdrawView({
       `Withdrawal submitted for ${numericEggs.toLocaleString()} eggs (${receiveGram} GRAM) — Pending Admin approval!`,
     );
     const remaining = profile.eggs - numericEggs;
-    setAmountInput(remaining >= MIN_WITHDRAW_EGGS ? String(Math.min(remaining, 100)) : '');
+    setAmountInput(remaining >= effectiveMinWithdraw ? String(Math.min(remaining, effectiveMinWithdraw)) : '');
     setMemo('');
   };
 
@@ -155,6 +172,19 @@ export function WithdrawView({
           </span>
         </div>
       </div>
+
+      {/* Required Channels Membership Check */}
+      {showChannelGate && onCheckChannels && (
+        <ChannelCheckCard
+          variant="compact"
+          requiredChannels={requiredChannels}
+          verification={channelVerification}
+          checking={checkingChannels}
+          checkError={channelCheckError}
+          onCheckChannels={onCheckChannels}
+          onRetryCheck={onRetryCheckChannels}
+        />
+      )}
 
       {/* 30 Ads Watch Requirement Gate */}
       <div
@@ -287,7 +317,7 @@ export function WithdrawView({
               Enter Amount
             </label>
             <span className="text-xs font-semibold text-stone-400 dark:text-stone-500 font-mono-num">
-              Min {MIN_WITHDRAW_EGGS} eggs
+              Min {effectiveMinWithdraw.toLocaleString()} eggs
             </span>
           </div>
 
@@ -303,7 +333,7 @@ export function WithdrawView({
                 setAmountInput(e.target.value);
                 setErrorMsg(null);
               }}
-              placeholder={String(Math.min(profile.eggs, 100))}
+              placeholder={String(Math.min(profile.eggs, effectiveMinWithdraw))}
               className="flex-1 min-h-[38px] bg-transparent text-base font-extrabold font-mono-num text-stone-900 dark:text-stone-100 focus:outline-none"
             />
             <span className="text-xs font-bold text-sky-600 dark:text-sky-400 font-mono-num whitespace-nowrap">
@@ -354,16 +384,18 @@ export function WithdrawView({
 
         <button
           type="submit"
-          disabled={!adGate.unlocked}
+          disabled={!adGate.unlocked || channelGateBlocked}
           className={`clay-btn w-full min-h-[50px] rounded-2xl font-extrabold text-sm ${
-            adGate.unlocked
+            adGate.unlocked && !channelGateBlocked
               ? 'clay-btn-sky'
               : 'clay-inset text-stone-500 dark:text-stone-400 cursor-not-allowed shadow-none'
           }`}
         >
-          {!adGate.unlocked
-            ? `Watch ${adGate.remaining} More Ad${adGate.remaining === 1 ? '' : 's'} to Withdraw`
-            : 'Withdraw'}
+          {channelGateBlocked
+            ? 'Join Required Channels Above to Withdraw'
+            : !adGate.unlocked
+              ? `Watch ${adGate.remaining} More Ad${adGate.remaining === 1 ? '' : 's'} to Withdraw`
+              : 'Withdraw'}
         </button>
       </form>
 

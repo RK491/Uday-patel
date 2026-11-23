@@ -30,7 +30,6 @@ import {
   claimAdsgramBotJoinReward,
   claimDailyStreak,
   claimPromoCode,
-  claimReferralMilestone,
   collectEggs,
   completeTask,
   COOP_FEVER_REQUIRED_ADS,
@@ -42,6 +41,7 @@ import {
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_ECONOMY_CONFIG,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
@@ -61,11 +61,15 @@ import {
   getCoopFeverProgress,
   getEffectiveAdminIds,
   getGoldenEggCooldownRemainingMs,
+  getTaskChannelCheckMode,
   getUnifiedUserId,
   getVerifiableClaimedChannelTasks,
   getWithdrawAdGateStatus,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
+  isChannelVerificationSatisfied,
+  isMustJoinChannelsEnabled,
+  mergeTaskDefinitions,
   MIN_WITHDRAW_ADS_WATCHED,
   normalizeTelegramChannelHandle,
   purchaseAutoHarvestDrone,
@@ -76,10 +80,12 @@ import {
   reinvestEggs,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveEconomyConfig,
   resolveMaintenanceConfig,
   resolveTaskPricingConfig,
   shouldShowSignUpBonusClaim,
   SIGNUP_BONUS_COINS,
+  type TaskChannelCheckMode,
   upgradeBasket,
   watchAdStep,
 } from './game/economy';
@@ -122,10 +128,12 @@ import {
   saveAdConfigInFirestore,
   saveCachedPlayerProfile,
   saveChannelsConfigInFirestore,
+  saveEconomyConfigInFirestore,
   saveMaintenanceConfigInFirestore,
   saveTaskPricingConfigInFirestore,
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
+  setCachedLiveEconomyConfig,
   setStoredGoldenEggClaimAtMs,
   subscribeToAdConfig,
   subscribeToAdminsConfig,
@@ -133,6 +141,7 @@ import {
   subscribeToBannedUsers,
   subscribeToChannelsConfig,
   subscribeToCustomTasks,
+  subscribeToEconomyConfig,
   subscribeToLeaderboard,
   subscribeToMaintenanceConfig,
   subscribeToPlayer,
@@ -161,12 +170,14 @@ import type {
   ChickenBreedId,
   DepositOrder,
   DynamicPromoCode,
+  EconomyConfig,
   LanguageCode,
   LeaderboardEntry,
   MaintenanceConfig,
   NavTab,
   PromoRewardType,
   ReferralRecord,
+  RequiredTelegramChannel,
   SeasonConfig,
   SubView,
   SystemDiagnosticsSnapshot,
@@ -297,82 +308,6 @@ function formatSyncErrorMessage(err: unknown, fallback: string): string {
   return raw || fallback;
 }
 
-// SHA-256('alphagram:admin:' + passcode) — used only for already-verified Admin IDs when
-// running on a static CDN/preview host where the Express /api/admin/auth backend returns HTTP 404.
-const STATIC_HOST_ADMIN_PASSCODE_SHA256 =
-  'a58d35ef1eaea117ad933406afc762325939c02ca7f5a1d36b1d0989d930a56b';
-
-const SHA256_K = [
-  0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
-  0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
-  0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
-  0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
-  0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
-  0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
-  0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
-  0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
-];
-
-function sha256Hex(input: string): string {
-  const bytes = new TextEncoder().encode(input);
-  const bitLen = bytes.length * 8;
-  const paddedLen = Math.ceil((bytes.length + 9) / 64) * 64;
-  const padded = new Uint8Array(paddedLen);
-  padded.set(bytes);
-  padded[bytes.length] = 0x80;
-  const view = new DataView(padded.buffer);
-  view.setUint32(paddedLen - 4, bitLen >>> 0, false);
-  view.setUint32(paddedLen - 8, Math.floor(bitLen / 0x100000000), false);
-
-  const h = [
-    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
-    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
-  ];
-  const w = new Int32Array(64);
-  const rotr = (x: number, n: number) => (x >>> n) | (x << (32 - n));
-
-  for (let offset = 0; offset < paddedLen; offset += 64) {
-    for (let i = 0; i < 16; i++) {
-      w[i] = view.getInt32(offset + i * 4, false);
-    }
-    for (let i = 16; i < 64; i++) {
-      const s0 = rotr(w[i - 15], 7) ^ rotr(w[i - 15], 18) ^ (w[i - 15] >>> 3);
-      const s1 = rotr(w[i - 2], 17) ^ rotr(w[i - 2], 19) ^ (w[i - 2] >>> 10);
-      w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
-    }
-    let [a, b, c, d, e, f, g, hh] = h;
-    for (let i = 0; i < 64; i++) {
-      const S1 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
-      const ch = (e & f) ^ (~e & g);
-      const temp1 = (hh + S1 + ch + SHA256_K[i] + w[i]) | 0;
-      const S0 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
-      const maj = (a & b) ^ (a & c) ^ (b & c);
-      const temp2 = (S0 + maj) | 0;
-      hh = g;
-      g = f;
-      f = e;
-      e = (d + temp1) | 0;
-      d = c;
-      c = b;
-      b = a;
-      a = (temp1 + temp2) | 0;
-    }
-    h[0] = (h[0] + a) | 0;
-    h[1] = (h[1] + b) | 0;
-    h[2] = (h[2] + c) | 0;
-    h[3] = (h[3] + d) | 0;
-    h[4] = (h[4] + e) | 0;
-    h[5] = (h[5] + f) | 0;
-    h[6] = (h[6] + g) | 0;
-    h[7] = (h[7] + hh) | 0;
-  }
-  return h.map((val) => (val >>> 0).toString(16).padStart(8, '0')).join('');
-}
-
-function verifyStaticHostAdminPasscode(passcode: string): boolean {
-  return sha256Hex(`alphagram:admin:${passcode.trim()}`) === STATIC_HOST_ADMIN_PASSCODE_SHA256;
-}
-
 export default function App() {
   const [detectedIdentity, setDetectedIdentity] = useState(() => resolveActivePlayerIdentity());
   const activePlayerId = detectedIdentity.playerId || getStoredPlayerId();
@@ -420,6 +355,9 @@ export default function App() {
     useState<WithdrawApproveMessageTemplate>(DEFAULT_WITHDRAW_APPROVE_TEMPLATE);
   const [taskPricingConfig, setTaskPricingConfig] =
     useState<TaskPricingConfig>(DEFAULT_TASK_PRICING_CONFIG);
+  const [economyConfig, setEconomyConfig] = useState<EconomyConfig>(DEFAULT_ECONOMY_CONFIG);
+  const economyConfigRef = useRef<EconomyConfig>(DEFAULT_ECONOMY_CONFIG);
+  economyConfigRef.current = economyConfig;
   const [systemResetConfig, setSystemResetConfig] = useState<SystemResetConfig>({
     resetEpochMs: 0,
     resetCount: 0,
@@ -443,9 +381,10 @@ export default function App() {
   const [playerSessionToken, setPlayerSessionToken] = useState<string>('');
   const playerSessionTokenRef = useRef<string>('');
   const [adminPasscodeSource, setAdminPasscodeSource] = useState<
-    'database' | 'server_file' | 'env' | 'default'
-  >('default');
+    'database' | 'server_file' | 'env' | 'default' | 'unconfigured'
+  >('env');
   const [adminPasscodeUpdatedAtMs, setAdminPasscodeUpdatedAtMs] = useState<number>(0);
+  const [adminNeedsPasscodeSetup, setAdminNeedsPasscodeSetup] = useState<boolean>(false);
   const [serverBotConfigured, setServerBotConfigured] = useState<boolean | undefined>(undefined);
   const [botConfigStatus, setBotConfigStatus] = useState<{
     configured: boolean;
@@ -469,6 +408,14 @@ export default function App() {
   const isAuthorizedAdmin =
     isAdminPlayerId(profile.uid, extraAdminIds) ||
     isAdminPlayerId(detectedIdentity.playerId || profile.uid, extraAdminIds);
+  const hasVerifiedAdminSession = () =>
+    isAuthorizedAdmin &&
+    adminUnlocked &&
+    Boolean(
+      adminSessionTokenRef.current &&
+        adminSessionTokenRef.current.trim().length >= 24 &&
+        adminSessionTokenRef.current.includes('.'),
+    );
   const isBanned = Boolean(banRecord) && !isAuthorizedAdmin;
   const isBannedRef = useRef(isBanned);
   isBannedRef.current = isBanned;
@@ -478,6 +425,10 @@ export default function App() {
     [channelsConfig],
   );
   const channelsGateEnabled = channelsConfig.enabled && activeRequiredChannels.length > 0;
+  const mustJoinGateEnabled = useMemo(
+    () => isMustJoinChannelsEnabled(channelsConfig),
+    [channelsConfig],
+  );
   const activeChannelsSignature = useMemo(
     () =>
       activeRequiredChannels
@@ -566,11 +517,24 @@ export default function App() {
     }
   });
   const [checkingChannels, setCheckingChannels] = useState(false);
+  const [refreshingMembership, setRefreshingMembership] = useState(false);
   const [channelCheckError, setChannelCheckError] = useState<string | null>(null);
   const [showChannelGateModal, setShowChannelGateModal] = useState(false);
   const [pendingPromoClaimCode, setPendingPromoClaimCode] = useState<string | null>(null);
   const pendingPromoClaimCodeRef = useRef<string | null>(null);
   const lastAutoChannelCheckAtRef = useRef<number>(0);
+  const channelsConfigRef = useRef(channelsConfig);
+  channelsConfigRef.current = channelsConfig;
+  const activeRequiredChannelsRef = useRef(activeRequiredChannels);
+  activeRequiredChannelsRef.current = activeRequiredChannels;
+  const channelVerificationRef = useRef(channelVerification);
+  channelVerificationRef.current = channelVerification;
+  const mustJoinGateEnabledRef = useRef(mustJoinGateEnabled);
+  mustJoinGateEnabledRef.current = mustJoinGateEnabled;
+  const membershipVerified = useMemo(
+    () => isChannelVerificationSatisfied(channelVerification, channelsConfig),
+    [channelVerification, channelsConfig],
+  );
 
   const skipWelcome = useMemo(() => {
     if (typeof window === 'undefined') return false;
@@ -1044,9 +1008,14 @@ export default function App() {
       telegramBotConfigured?: boolean;
       telegramBotUsername?: string;
       telegramAppShortName?: string;
-      adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default';
+      adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default' | 'unconfigured';
       adminPasscodeUpdatedAtMs?: number;
+      adminNeedsPasscodeSetup?: boolean;
       maintenance?: Partial<MaintenanceConfig>;
+      channelsConfig?: ChannelsConfig;
+      economy?: Partial<EconomyConfig>;
+      minWithdrawEggs?: number;
+      perReferRewardCoins?: number;
     }>('/api/config').then((cfg) => {
       if (!cfg) return;
       if (cfg.gramDepositAddress) {
@@ -1066,6 +1035,31 @@ export default function App() {
       }
       if (typeof cfg.adminPasscodeUpdatedAtMs === 'number') {
         setAdminPasscodeUpdatedAtMs(cfg.adminPasscodeUpdatedAtMs);
+      }
+      if (typeof cfg.adminNeedsPasscodeSetup === 'boolean') {
+        setAdminNeedsPasscodeSetup(cfg.adminNeedsPasscodeSetup);
+      }
+      if (cfg.channelsConfig && Array.isArray(cfg.channelsConfig.channels)) {
+        const serverChannels = cfg.channelsConfig;
+        setChannelsConfig((prev) =>
+          (prev.updatedAtMs || 0) > (serverChannels.updatedAtMs || 0) ? prev : serverChannels,
+        );
+      }
+      if (
+        cfg.economy ||
+        typeof cfg.minWithdrawEggs === 'number' ||
+        typeof cfg.perReferRewardCoins === 'number'
+      ) {
+        const serverEconomy = resolveEconomyConfig({
+          ...cfg.economy,
+          minWithdrawEggs: cfg.economy?.minWithdrawEggs ?? cfg.minWithdrawEggs,
+          perReferRewardCoins: cfg.economy?.perReferRewardCoins ?? cfg.perReferRewardCoins,
+        });
+        setEconomyConfig((prev) => {
+          const chosen = prev.updatedAtMs > serverEconomy.updatedAtMs ? prev : serverEconomy;
+          setCachedLiveEconomyConfig(chosen);
+          return chosen;
+        });
       }
       if (cfg.maintenance) {
         const serverMaint = resolveMaintenanceConfig(cfg.maintenance);
@@ -1111,6 +1105,10 @@ export default function App() {
     const unsubTaskPricing = subscribeToTaskPricingConfig((pricing) => {
       setTaskPricingConfig(pricing);
     });
+    const unsubEconomy = subscribeToEconomyConfig((econ) => {
+      setCachedLiveEconomyConfig(econ);
+      setEconomyConfig(econ);
+    });
     const unsubSystemReset = subscribeToSystemResetConfig((resetCfg) => {
       setSystemResetConfig(resetCfg);
     });
@@ -1131,6 +1129,7 @@ export default function App() {
       unsubSeason();
       unsubPayoutTemplate();
       unsubTaskPricing();
+      unsubEconomy();
       unsubSystemReset();
       unsubMaintenance();
       window.clearTimeout(maintenanceLoadSafetyTimer);
@@ -1233,7 +1232,12 @@ export default function App() {
   }, [activePlayerId]);
 
   useEffect(() => {
-    if (subView !== 'admin' || !adminUnlocked || !isAdminPlayerId(profile.uid, extraAdminIds)) {
+    if (
+      subView !== 'admin' ||
+      !adminUnlocked ||
+      !adminSessionToken ||
+      !isAdminPlayerId(profile.uid, extraAdminIds)
+    ) {
       return;
     }
     const unsubWdReqs = subscribeToAllWithdrawRequests((items) => {
@@ -1250,7 +1254,7 @@ export default function App() {
       unsubRecentPlayers();
       unsubBannedUsers();
     };
-  }, [adminUnlocked, extraAdminIds, profile.uid, subView]);
+  }, [adminSessionToken, adminUnlocked, extraAdminIds, profile.uid, subView]);
 
   // Ensure active player exists in Firestore and subscribe live to all subcollections
   useEffect(() => {
@@ -1338,21 +1342,18 @@ export default function App() {
             const friendLabel =
               newest.referredName ||
               (newest.referredHandle ? `@${newest.referredHandle.replace(/^@/, '')}` : 'A friend');
+            const defaultReferCoins = economyConfigRef.current.perReferRewardCoins;
             const coinsEarned = Math.max(
-              REFERRER_SIGNUP_BONUS_COINS,
-              Number(newest.coinsEarned || REFERRER_SIGNUP_BONUS_COINS),
+              defaultReferCoins,
+              Number(newest.coinsEarned || defaultReferCoins),
             );
             triggerRewardConfetti();
             playClaimSound(soundsEnabledRef.current);
             triggerHapticFeedback('success');
             if (newlyActivated.length === 1) {
-              showToast(
-                `🎉 Referral Activated! ${friendLabel} bought their 1st hen (+${coinsEarned.toLocaleString()} Coins)!`,
-              );
+              showToast(`🎉 ${friendLabel} active! +${coinsEarned.toLocaleString()} Coins earned!`);
             } else {
-              showToast(
-                `🎉 ${newlyActivated.length} Referrals Activated! Check Friends tab for your rewards!`,
-              );
+              showToast(`🎉 ${newlyActivated.length} Referrals active! Check Friends tab.`);
             }
           } else if (newlyJoinedPending.length > 0) {
             const newest = newlyJoinedPending[0];
@@ -1360,9 +1361,8 @@ export default function App() {
               newest.referredName ||
               (newest.referredHandle ? `@${newest.referredHandle.replace(/^@/, '')}` : 'A friend');
             triggerHapticFeedback('light');
-            showToast(
-              `👋 ${friendLabel} joined via your link! +${REFERRER_SIGNUP_BONUS_COINS} coins unlock when they buy their 1st hen.`,
-            );
+            const perRefer = economyConfigRef.current.perReferRewardCoins;
+            showToast(`👋 ${friendLabel} joined! +${perRefer.toLocaleString()}c unlocks on 1st hen.`);
           }
         }
         setReferrals(refs);
@@ -1632,16 +1632,27 @@ export default function App() {
 
     const syncDirectReferralRecord = async (referrerIdValue: string, userProfile: UserFarmProfile) => {
       try {
+        const tgInit = getTelegramInitData();
+        const sessionTok = playerSessionTokenRef.current;
+        const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+        if (sessionTok) {
+          headers.Authorization = `Bearer ${sessionTok}`;
+        }
+        if (tgInit) {
+          headers['x-telegram-init-data'] = tgInit;
+        }
         await fetch(resolveApiUrl('/api/referrals'), {
           method: 'POST',
           cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
+          headers,
           body: JSON.stringify({
             userId: targetUid,
             referrerId: referrerIdValue,
             displayName: userProfile.displayName,
             handle: userProfile.handle,
             photoUrl: userProfile.photoUrl,
+            initData: tgInit,
+            token: sessionTok,
           }),
         });
       } catch {
@@ -1814,7 +1825,6 @@ export default function App() {
 
           if (response.ok && payload?.ok) {
             if (payload.applied || payload.claimed) {
-              const bonus = Number(payload.referredBonusCoins ?? 100);
               const serverNextCoins = Number(payload.nextReferredCoins);
               const resolvedReferrer = payload.referrerUid || refCode;
               const isActivatedNow = Boolean(payload.activated ?? payload.referralActivated);
@@ -1827,7 +1837,7 @@ export default function App() {
                   ...prev,
                   referredBy: resolvedReferrer,
                   referralActivated: prev.referralActivated || isActivatedNow,
-                  coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins + bonus,
+                  coins: Number.isFinite(serverNextCoins) ? serverNextCoins : prev.coins,
                 };
                 latestProfileRef.current = next;
                 saveCachedPlayerProfile(next);
@@ -1842,15 +1852,15 @@ export default function App() {
                   Number(
                     payload.bonusAwarded ??
                       payload.coinsRewarded ??
-                      REFERRER_SIGNUP_BONUS_COINS,
-                  ) || REFERRER_SIGNUP_BONUS_COINS,
+                      economyConfigRef.current.perReferRewardCoins,
+                  ) || economyConfigRef.current.perReferRewardCoins,
                 );
               }
               triggerRewardConfetti();
               playClaimSound(soundsEnabledRef.current);
               triggerHapticFeedback('success');
               showToast(
-                `🎉 Referral Linked! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
+                `🎉 Joined via ${payload.referrerName || 'a friend'}! Referral link active.`,
               );
               clearPendingRef('api_referral_linked');
               return;
@@ -1898,7 +1908,11 @@ export default function App() {
             refCode,
             hasReferredBy: Boolean(snapshotProfile.referredBy),
           });
-          const refRes = await applyReferralCodeInFirestore(snapshotProfile, refCode);
+          const refRes = await applyReferralCodeInFirestore(
+            snapshotProfile,
+            refCode,
+            economyConfigRef.current.perReferRewardCoins,
+          );
           if (!isStillSamePlayer()) {
             console.log('[ReferralTrace] applyReferral:player_changed_after_firestore', {
               targetUid,
@@ -1922,15 +1936,13 @@ export default function App() {
             triggerRewardConfetti();
             playClaimSound(soundsEnabledRef.current);
             triggerHapticFeedback('success');
-            showToast(
-              `🎉 Referral Linked! +100 welcome coins unlocked via ${refRes.referrerName}!`,
-            );
+            showToast(`🎉 Joined via ${refRes.referrerName}! Referral link active.`);
             const notifyEvent: 'referral_pending' | 'referral_joined' = refRes.activated
               ? 'referral_joined'
               : 'referral_pending';
             const notifyRewardCoins = refRes.activated
               ? refRes.coinsRewarded
-              : REFERRER_SIGNUP_BONUS_COINS;
+              : economyConfigRef.current.perReferRewardCoins;
             const notifyPayload = await safeFetchJson<{ ok?: boolean; sent?: boolean }>('/api/referrals/notify', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -2113,7 +2125,7 @@ export default function App() {
                       referredUid: targetUid,
                       referredName: latest.displayName,
                       referredHandle: latest.handle,
-                      rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+                      rewardCoins: economyConfigRef.current.perReferRewardCoins,
                       initData: getTelegramInitData(),
                       token: playerSessionTokenRef.current,
                     }),
@@ -2123,7 +2135,7 @@ export default function App() {
                 playClaimSound(soundsEnabledRef.current);
                 triggerHapticFeedback('success');
                 showToast(
-                  `🎉 Referral Linked! +${bonus} welcome coins unlocked via ${payload.referrerName || 'a friend'}!`,
+                  `🎉 Joined via ${payload.referrerName || 'a friend'}! +${bonus}c bonus unlocked.`,
                 );
               }
               return;
@@ -2272,7 +2284,6 @@ export default function App() {
       deposit?: DepositOrder;
       withdrawal?: WithdrawalOrder;
       referrerCommissionCoins?: number;
-      referralEggCommission?: number;
       activateReferral?: boolean;
     }): Promise<boolean> => {
       if (isBannedRef.current) {
@@ -2298,8 +2309,8 @@ export default function App() {
           deposit: params.deposit,
           withdrawal: params.withdrawal,
           referrerCommissionCoins: params.referrerCommissionCoins,
-          referralEggCommission: params.referralEggCommission,
           activateReferral: params.activateReferral,
+          perReferRewardCoins: economyConfigRef.current.perReferRewardCoins,
         });
         if (params.deposit && applied) {
           latestProfileRef.current = params.nextProfile;
@@ -2344,7 +2355,10 @@ export default function App() {
   );
 
   const handleCheckChannels = useCallback(
-    async (opts?: { silent?: boolean }): Promise<ChannelVerificationResult | null> => {
+    async (opts?: {
+      silent?: boolean;
+      forceRefresh?: boolean;
+    }): Promise<ChannelVerificationResult | null> => {
       if (!channelsGateEnabled) {
         const disabledResult: ChannelVerificationResult = {
           ok: true,
@@ -2356,6 +2370,7 @@ export default function App() {
         };
         setChannelCheckError(null);
         setChannelVerification(disabledResult);
+        channelVerificationRef.current = disabledResult;
         setShowChannelGateModal(false);
         const pendingCode = pendingPromoClaimCodeRef.current;
         if (pendingCode) {
@@ -2364,6 +2379,21 @@ export default function App() {
           executeClaimPromo(pendingCode, false);
         }
         return disabledResult;
+      }
+
+      if (opts?.forceRefresh) {
+        channelVerificationRef.current = null;
+        setChannelVerification(null);
+        try {
+          const uidA = latestProfileRef.current.uid;
+          const uidB = activePlayerIdRef.current;
+          if (uidA) localStorage.removeItem(`chickenland_channels_verified_v1_${uidA}`);
+          if (uidB && uidB !== uidA) {
+            localStorage.removeItem(`chickenland_channels_verified_v1_${uidB}`);
+          }
+        } catch {
+          // ignore storage errors
+        }
       }
 
       setCheckingChannels(true);
@@ -2380,6 +2410,8 @@ export default function App() {
             initData: getTelegramInitData(),
             token: playerSessionTokenRef.current,
             requiredChannels: activeRequiredChannels,
+            forceRefresh: Boolean(opts?.forceRefresh),
+            _ts: Date.now(),
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -2422,6 +2454,7 @@ export default function App() {
         }
 
         setChannelVerification(data);
+        channelVerificationRef.current = data;
 
         if (data.verificationMode === 'disabled') {
           setShowChannelGateModal(false);
@@ -2508,31 +2541,131 @@ export default function App() {
     [activeRequiredChannels, channelsGateEnabled, executeClaimPromo, showToast, soundsEnabled],
   );
 
+  const verifiedChannelTaskProofRef = useRef<Record<string, number>>({});
+
+  const clearMembershipCache = useCallback(() => {
+    const uidA = latestProfileRef.current.uid;
+    const uidB = activePlayerIdRef.current;
+    verifiedChannelTaskProofRef.current = {};
+    channelVerificationRef.current = null;
+    setChannelVerification(null);
+    setChannelCheckError(null);
+    try {
+      if (uidA) localStorage.removeItem(`chickenland_channels_verified_v1_${uidA}`);
+      if (uidB && uidB !== uidA) {
+        localStorage.removeItem(`chickenland_channels_verified_v1_${uidB}`);
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const handleRefreshMembership = useCallback(async () => {
+    if (refreshingMembership || checkingChannels) return;
+    setRefreshingMembership(true);
+    playTabTapSound(soundsEnabled);
+    triggerHapticFeedback('selection');
+    try {
+      clearMembershipCache();
+      if (!channelsGateEnabled) {
+        showToast('Membership cache cleared — no required channels active.');
+        return;
+      }
+      const result = await handleCheckChannels({ forceRefresh: true });
+      if (
+        mustJoinGateEnabledRef.current &&
+        !isChannelVerificationSatisfied(result, channelsConfigRef.current)
+      ) {
+        setShowChannelGateModal(true);
+      }
+    } finally {
+      setRefreshingMembership(false);
+    }
+  }, [
+    channelsGateEnabled,
+    checkingChannels,
+    clearMembershipCache,
+    handleCheckChannels,
+    refreshingMembership,
+    showToast,
+    soundsEnabled,
+  ]);
+
+  const ensureMustJoinVerified = useCallback(
+    async (actionLabel?: string): Promise<boolean> => {
+      if (!mustJoinGateEnabledRef.current) {
+        return true;
+      }
+      if (
+        isChannelVerificationSatisfied(
+          channelVerificationRef.current,
+          channelsConfigRef.current,
+        )
+      ) {
+        return true;
+      }
+      const liveResult = await handleCheckChannels({ silent: true, forceRefresh: true });
+      if (isChannelVerificationSatisfied(liveResult, channelsConfigRef.current)) {
+        return true;
+      }
+      pendingPromoClaimCodeRef.current = null;
+      setPendingPromoClaimCode(null);
+      setShowChannelGateModal(true);
+      triggerHapticFeedback('warning');
+      const handles = formatChannelsHandleSummary(activeRequiredChannelsRef.current);
+      showToast(
+        actionLabel
+          ? `Join ${handles} first to ${actionLabel}.`
+          : `Join all required channels (${handles}) before playing.`,
+      );
+      return false;
+    },
+    [handleCheckChannels, showToast],
+  );
+
   const handleVerifyTaskChannel = useCallback(
     async (
       actionUrl: string,
-      options?: { requireChannelCheck?: boolean },
+      options?: {
+        requireChannelCheck?: boolean;
+        channelCheckMode?: TaskChannelCheckMode;
+        taskId?: string;
+      },
     ): Promise<{ joined: boolean; handle?: string; status?: string; reason?: string }> => {
-      // Only enforce Telegram getChatMember verification when Enable Channel Check is explicitly enabled
-      if (!options?.requireChannelCheck) {
+      const mode: TaskChannelCheckMode =
+        options?.channelCheckMode ??
+        (options?.requireChannelCheck === false ? 'none' : 'strict');
+      if (mode === 'none') {
         return { joined: true };
       }
-      if (!actionUrl) {
-        return { joined: true };
-      }
-      if (/[?&]start(app)?=/i.test(actionUrl) || /t\.me\/(\+|joinchat\/)/i.test(actionUrl)) {
-        return { joined: true };
-      }
-      const normalized = normalizeTelegramChannelHandle(actionUrl);
-      if (!normalized.handle) {
-        return { joined: true };
-      }
-      const numericUserId = extractTelegramNumericUserId(latestProfileRef.current.uid);
-      if (!numericUserId) {
-        const reason = `Open in Telegram and join ${normalized.handle} first, then tap Retry.`;
+      const trimmedUrl = String(actionUrl || '').trim();
+      if (!trimmedUrl) {
+        const reason = 'No Telegram channel link configured for verification.';
         triggerHapticFeedback('warning');
         showToast(reason);
-        return { joined: false, handle: normalized.handle, status: 'no_telegram_user', reason };
+        return { joined: false, status: 'unverifiable_channel', reason };
+      }
+      if (/[?&]start(app)?=/i.test(trimmedUrl)) {
+        const reason = 'Bot ?start= links cannot verify channel membership. Use a t.me/Channel link.';
+        triggerHapticFeedback('warning');
+        showToast(reason);
+        return { joined: false, status: 'unverifiable_channel', reason };
+      }
+      const isInviteUrl = /t\.me\/(\+|joinchat\/)/i.test(trimmedUrl);
+      const normalized = normalizeTelegramChannelHandle(trimmedUrl);
+      if (!normalized.handle && !isInviteUrl) {
+        const reason = 'Channel handle could not be resolved for verification.';
+        triggerHapticFeedback('warning');
+        showToast(reason);
+        return { joined: false, status: 'unverifiable_channel', reason };
+      }
+      const displayHandle = normalized.handle || 'this channel';
+      const numericUserId = extractTelegramNumericUserId(latestProfileRef.current.uid);
+      if (!numericUserId) {
+        const reason = `Open in Telegram and join ${displayHandle} first, then tap Retry.`;
+        triggerHapticFeedback('warning');
+        showToast(reason);
+        return { joined: false, handle: displayHandle, status: 'no_telegram_user', reason };
       }
       try {
         const res = await fetch(resolveApiUrl('/api/telegram/check-task-channel'), {
@@ -2542,8 +2675,8 @@ export default function App() {
             playerId: latestProfileRef.current.uid,
             initData: getTelegramInitData(),
             token: playerSessionTokenRef.current,
-            actionUrl,
-            requireChannelCheck: options?.requireChannelCheck,
+            actionUrl: trimmedUrl,
+            requireChannelCheck: true,
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -2561,6 +2694,7 @@ export default function App() {
 
         const isMissingApi = !isJson || res.status === 404 || res.status === 405;
         if (isMissingApi || data?.status === 'bot_unconfigured') {
+          if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
           const reason = isMissingApi
             ? 'Backend membership verification server unavailable. Open via Bot server.'
             : data?.reason || 'Backend Bot verification is unavailable right now.';
@@ -2568,26 +2702,28 @@ export default function App() {
           showToast(reason);
           return {
             joined: false,
-            handle: normalized.handle,
+            handle: displayHandle,
             status: isMissingApi ? 'api_error' : 'bot_unconfigured',
             reason,
           };
         }
 
         if (!res.ok || !data?.ok) {
+          if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
           const reason =
-            data?.reason || `Could not confirm ${normalized.handle} join — tap Retry.`;
+            data?.reason || `Could not confirm ${displayHandle} join — tap Retry.`;
           triggerHapticFeedback('warning');
           showToast(reason);
-          return { joined: false, handle: normalized.handle, status: 'api_error', reason };
+          return { joined: false, handle: displayHandle, status: 'api_error', reason };
         }
-        if (data.enforced === false && data.joined) {
-          return { joined: true, handle: data.handle || normalized.handle, status: data.status };
+        if (data.joined && data.enforced !== false) {
+          if (options?.taskId) {
+            verifiedChannelTaskProofRef.current[options.taskId] = Date.now();
+          }
+          return { joined: true, handle: data.handle || displayHandle, status: data.status };
         }
-        if (data.joined) {
-          return { joined: true, handle: data.handle || normalized.handle, status: data.status };
-        }
-        const handleLabel = data.handle || normalized.handle;
+        if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
+        const handleLabel = data.handle || displayHandle;
         const reason =
           data.reason || `Not joined ${handleLabel} yet — tap Join, then Retry.`;
         triggerHapticFeedback('warning');
@@ -2595,14 +2731,15 @@ export default function App() {
         return {
           joined: false,
           handle: handleLabel,
-          status: data.status,
+          status: data.status || 'unverified',
           reason,
         };
       } catch {
-        const netReason = `Unable to verify ${normalized.handle} right now — tap Retry!`;
+        if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
+        const netReason = `Unable to verify ${displayHandle} right now — tap Retry!`;
         triggerHapticFeedback('warning');
         showToast(netReason);
-        return { joined: false, handle: normalized.handle, status: 'network_error', reason: netReason };
+        return { joined: false, handle: displayHandle, status: 'network_error', reason: netReason };
       }
     },
     [showToast],
@@ -2696,23 +2833,26 @@ export default function App() {
     }
 
     // Invalidate stale cached verification if required channels changed
-    setChannelVerification((prev) => {
-      if (!prev || prev.verificationMode !== 'telegram_bot') return prev;
-      const prevSig = (prev.channels || [])
-        .map((c) => c.handle.trim().toLowerCase())
-        .sort()
-        .join(',');
-      if (prevSig !== activeChannelsSignature) {
-        return null;
-      }
-      return prev;
-    });
-  }, [activeChannelsSignature, channelsGateEnabled, executeClaimPromo]);
+    const currentVerification = channelVerificationRef.current;
+    if (
+      currentVerification &&
+      currentVerification.verificationMode === 'telegram_bot' &&
+      !isChannelVerificationSatisfied(currentVerification, channelsConfigRef.current)
+    ) {
+      clearMembershipCache();
+    }
+  }, [activeChannelsSignature, channelsGateEnabled, clearMembershipCache, executeClaimPromo]);
 
-  // Live-sync required Telegram channels when returning from Telegram or opening gate/withdraw views
+  // Live-sync required Telegram channels when returning from Telegram or opening gate/withdraw/must-join views
   useEffect(() => {
     if (!channelsGateEnabled || isBanned || !isPlayerSynced) return;
-    if (showChannelGateModal || subView === 'withdraw') {
+    const shouldAutoVerifyNow =
+      showChannelGateModal ||
+      subView === 'withdraw' ||
+      (mustJoinGateEnabled &&
+        subView !== 'admin' &&
+        !isChannelVerificationSatisfied(channelVerificationRef.current, channelsConfigRef.current));
+    if (shouldAutoVerifyNow) {
       const now = Date.now();
       if (now - lastAutoChannelCheckAtRef.current >= 2500) {
         lastAutoChannelCheckAtRef.current = now;
@@ -2721,7 +2861,13 @@ export default function App() {
     }
     const triggerLiveChannelSync = () => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-      if (!showChannelGateModal && subView !== 'withdraw') return;
+      const shouldSyncOnFocus =
+        showChannelGateModal ||
+        subView === 'withdraw' ||
+        (mustJoinGateEnabled &&
+          subView !== 'admin' &&
+          !isChannelVerificationSatisfied(channelVerificationRef.current, channelsConfigRef.current));
+      if (!shouldSyncOnFocus) return;
       const now = Date.now();
       if (now - lastAutoChannelCheckAtRef.current < 2000) return;
       lastAutoChannelCheckAtRef.current = now;
@@ -2733,6 +2879,7 @@ export default function App() {
     handleCheckChannels,
     isBanned,
     isPlayerSynced,
+    mustJoinGateEnabled,
     showChannelGateModal,
     subView,
   ]);
@@ -2806,7 +2953,6 @@ export default function App() {
       void persistMutation({
         nextProfile,
         transaction: res.transaction,
-        referralEggCommission: res.referralEggCommission,
       });
       showToast(`+${res.collected.toLocaleString()} eggs collected`);
     },
@@ -2815,16 +2961,17 @@ export default function App() {
 
   const handleCollectEggs = () => {
     if (watchingAdLoading) return;
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const pending = calculatePendingEggs(current, now);
-    const precheck = collectEggs(current, now, pending);
-    if ('error' in precheck) {
-      showToast(precheck.error);
-      return;
-    }
-
     void (async () => {
+      if (!(await ensureMustJoinVerified('collect eggs'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const pending = calculatePendingEggs(current, now);
+      const precheck = collectEggs(current, now, pending);
+      if ('error' in precheck) {
+        showToast(precheck.error);
+        return;
+      }
+
       setWatchingAdLoading(true);
       setActiveAdNetwork(null);
       try {
@@ -2893,14 +3040,16 @@ export default function App() {
                 referredUid: nextProfile.uid,
                 referredName: nextProfile.displayName,
                 referredHandle: nextProfile.handle,
-                rewardCoins: REFERRER_SIGNUP_BONUS_COINS,
+                rewardCoins: economyConfigRef.current.perReferRewardCoins,
                 initData: getTelegramInitData(),
                 token: playerSessionTokenRef.current,
               }),
             });
           }
         })();
-        showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''} & unlocked +${REFERRER_SIGNUP_BONUS_COINS} referral bonus!`);
+        showToast(
+          `🎉 Bought ${qty} hen${qty > 1 ? 's' : ''} · +${economyConfigRef.current.perReferRewardCoins.toLocaleString()}c refer bonus unlocked!`,
+        );
       } else {
         showToast(`Purchased ${qty} chicken${qty > 1 ? 's' : ''}!`);
       }
@@ -2910,6 +3059,7 @@ export default function App() {
 
   const handleBuyChickens = async (breed: ChickenBreedId, qty: number) => {
     if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('buy chickens'))) return;
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const now = Date.now();
@@ -3045,6 +3195,7 @@ export default function App() {
   const handleStartReinvestWithAd = useCallback(
     async (eggsAmount: number) => {
       if (watchingAdLoading) return;
+      if (!(await ensureMustJoinVerified('reinvest eggs'))) return;
       const now = Date.now();
       const precheck = reinvestEggs(latestProfileRef.current, eggsAmount, now);
       if ('error' in precheck) {
@@ -3077,13 +3228,32 @@ export default function App() {
         setWatchingAdLoading(false);
       }
     },
-    [adConfig, executeReinvest, showToast, watchingAdLoading],
+    [adConfig, ensureMustJoinVerified, executeReinvest, showToast, watchingAdLoading],
   );
 
   const handleConfirmWithdraw = async (eggsAmount: number, walletAddress: string, memo: string) => {
+    if (!(await ensureMustJoinVerified('withdraw GRAM'))) {
+      return;
+    }
+    if (
+      channelsGateEnabled &&
+      activeRequiredChannels.length > 0 &&
+      channelVerification?.verificationMode === 'telegram_bot' &&
+      !channelVerification.allJoined
+    ) {
+      showToast('Join all required channels & tap Check Channels first.');
+      return;
+    }
     await runClaimedChannelLeaveAudit(true);
     const now = Date.now();
-    const res = executeWithdrawal(latestProfileRef.current, eggsAmount, walletAddress, memo, now);
+    const res = executeWithdrawal(
+      latestProfileRef.current,
+      eggsAmount,
+      walletAddress,
+      memo,
+      now,
+      economyConfigRef.current.minWithdrawEggs,
+    );
     if ('error' in res) {
       showToast(res.error);
       return;
@@ -3126,6 +3296,12 @@ export default function App() {
     decision: 'approved' | 'rejected',
     adminNote: string,
   ) => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required before modifying payouts.');
+      return;
+    }
     const sendWithdrawNotifyDirectPreview = async (): Promise<{
       userDmSent: boolean;
       userDmReason?: string;
@@ -3143,7 +3319,9 @@ export default function App() {
           const chTarget = payoutChannel.startsWith('@') || /^-?\d+$/.test(payoutChannel)
             ? payoutChannel
             : `@${payoutChannel}`;
-          const miniAppUrl = `https://t.me/${telegramBotConfig.botUsername}/${telegramBotConfig.appShortName}`;
+          const miniAppUrl = telegramBotConfig.appShortName
+            ? `https://t.me/${telegramBotConfig.botUsername}/${telegramBotConfig.appShortName}`
+            : `https://t.me/${telegramBotConfig.botUsername}`;
           let chPayload: Record<string, unknown>;
           if (decision === 'approved') {
             const chRendered = renderPayoutChannelApproveMessage({
@@ -3161,8 +3339,8 @@ export default function App() {
               chat_id: chTarget,
               text: chRendered.htmlText,
               parse_mode: 'HTML',
-              ...(chRendered.buttonText && /^https:\/\//i.test(chRendered.buttonUrl)
-                ? { reply_markup: { inline_keyboard: [[{ text: chRendered.buttonText, url: chRendered.buttonUrl }]] } }
+              ...(chRendered.inlineButtons.length > 0
+                ? { reply_markup: { inline_keyboard: chRendered.inlineButtons } }
                 : {}),
             };
           } else {
@@ -3266,9 +3444,13 @@ export default function App() {
       try {
         const res = await fetch(resolveApiUrl('/api/withdraw/notify'), {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(adminSessionToken ? { Authorization: `Bearer ${adminSessionToken}` } : {}),
+          },
           body: JSON.stringify({
             withdrawalId: request.id,
+            txId: request.txId || request.id,
             initData: getTelegramInitData(),
             token: adminSessionToken,
             displayName: request.displayName,
@@ -3347,6 +3529,7 @@ export default function App() {
     icon: string;
     actionUrl: string;
     totalSlots?: number;
+    requireChannelCheck?: boolean;
   }) => {
     try {
       await createCustomTaskInFirestore(input);
@@ -3366,6 +3549,7 @@ export default function App() {
     totalSlots: number;
     requireChannelCheck?: boolean;
   }): Promise<boolean> => {
+    if (!(await ensureMustJoinVerified('publish a sponsor task'))) return false;
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const now = Date.now();
@@ -3438,6 +3622,7 @@ export default function App() {
   );
 
   const handleTopUpTask = async (taskId: string, budgetCoins: number): Promise<boolean> => {
+    if (!(await ensureMustJoinVerified('top up campaign'))) return false;
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const task = customTasks.find((t) => t.id === taskId);
@@ -3479,6 +3664,7 @@ export default function App() {
   };
 
   const handleRefundTask = async (taskId: string): Promise<boolean> => {
+    if (!(await ensureMustJoinVerified('refund campaign'))) return false;
     await ensurePromiseRef.current;
     const current = latestProfileRef.current;
     const task = customTasks.find((t) => t.id === taskId);
@@ -3534,6 +3720,12 @@ export default function App() {
   };
 
   const handleSaveAdConfig = async (cfg: Omit<AdConfig, 'updatedAtMs'>): Promise<boolean> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required.');
+      return false;
+    }
     try {
       const saved = await saveAdConfigInFirestore(cfg);
       setAdConfig(saved);
@@ -3550,16 +3742,127 @@ export default function App() {
   const handleSaveChannelsConfig = async (
     cfg: Omit<ChannelsConfig, 'updatedAtMs'>,
   ): Promise<boolean> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required.');
+      return false;
+    }
+    let saved: ChannelsConfig | null = null;
+    let fsErr: unknown = null;
     try {
-      const saved = await saveChannelsConfigInFirestore(cfg);
-      setChannelsConfig(saved);
+      saved = await saveChannelsConfigInFirestore(cfg);
+    } catch (err) {
+      fsErr = err;
+    }
+
+    const serverRes = await safeFetchJson<{
+      ok?: boolean;
+      channelsConfig?: ChannelsConfig;
+    }>('/api/admin/channels', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...cfg,
+        token: adminSessionTokenRef.current,
+        initData: getTelegramInitData(),
+      }),
+    });
+
+    const finalSaved = saved || (serverRes?.ok ? serverRes.channelsConfig || null : null);
+    if (finalSaved) {
+      setChannelsConfig(finalSaved);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
       showToast('Channel settings saved & synced live!');
       return true;
-    } catch (err) {
-      showToast(formatSyncErrorMessage(err, 'Failed to save channel settings to database.'));
-      return false;
+    }
+
+    showToast(formatSyncErrorMessage(fsErr, 'Failed to save channel settings to database.'));
+    return false;
+  };
+
+  const handleSyncChannelsWithBot = async (payload?: {
+    enabled?: boolean;
+    mustJoin?: boolean;
+    channels?: RequiredTelegramChannel[];
+    getCodeChannelUrl?: string;
+  }) => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      return {
+        ok: false,
+        error: 'Admin passcode verification required to sync channels with Bot.',
+      };
+    }
+    try {
+      const response = await fetch(resolveApiUrl('/api/telegram/sync-channels'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          token: adminSessionTokenRef.current,
+          initData: getTelegramInitData(),
+          enabled: payload?.enabled,
+          mustJoin: payload?.mustJoin,
+          channels: payload?.channels,
+          getCodeChannelUrl: payload?.getCodeChannelUrl,
+        }),
+      });
+      const data = (await response.json().catch(() => ({}))) as {
+        ok?: boolean;
+        botConfigured?: boolean;
+        botUsername?: string | null;
+        channelsConfig?: ChannelsConfig;
+        error?: string;
+        results?: Array<{
+          id: string;
+          handle: string;
+          chatId?: string;
+          title?: string;
+          memberCount?: number | null;
+          botIsAdmin: boolean;
+          botStatus: string;
+          error?: string;
+        }>;
+      };
+      if (typeof data.botConfigured === 'boolean') {
+        setServerBotConfigured(data.botConfigured);
+      }
+      if (response.ok && data.ok && data.channelsConfig) {
+        setChannelsConfig(data.channelsConfig);
+        void saveChannelsConfigInFirestore({
+          enabled: data.channelsConfig.enabled,
+          mustJoin: Boolean(data.channelsConfig.mustJoin),
+          channels: data.channelsConfig.channels,
+          getCodeChannelUrl: data.channelsConfig.getCodeChannelUrl,
+        }).catch(() => undefined);
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast('Channels synced live from Telegram Bot!');
+        return {
+          ok: true,
+          botConfigured: data.botConfigured,
+          botUsername: data.botUsername,
+          channelsConfig: data.channelsConfig,
+          results: data.results,
+        };
+      }
+      if (response.status === 401 || response.status === 403) {
+        setAdminUnlocked(false);
+        setAdminSessionToken('');
+      }
+      return {
+        ok: false,
+        botConfigured: data.botConfigured,
+        error: data.error || `Failed to sync channels (HTTP ${response.status}).`,
+      };
+    } catch {
+      return {
+        ok: false,
+        error: 'Unable to reach server for Telegram Bot channel sync.',
+      };
     }
   };
 
@@ -3579,9 +3882,61 @@ export default function App() {
     }
   };
 
+  const handleSaveEconomyConfig = async (
+    cfg: Omit<EconomyConfig, 'updatedAtMs'>,
+  ): Promise<boolean> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required to modify economy & payout limits.');
+      return false;
+    }
+    let saved: EconomyConfig | null = null;
+    let fsErr: unknown = null;
+    try {
+      saved = await saveEconomyConfigInFirestore(cfg);
+    } catch (err) {
+      fsErr = err;
+    }
+
+    const serverRes = await safeFetchJson<{
+      ok?: boolean;
+      economy?: EconomyConfig;
+    }>('/api/admin/economy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ...cfg,
+        token: adminSessionTokenRef.current,
+        initData: getTelegramInitData(),
+      }),
+    });
+
+    const finalSaved = saved || (serverRes?.ok ? serverRes.economy || null : null);
+    if (finalSaved) {
+      setCachedLiveEconomyConfig(finalSaved);
+      setEconomyConfig(finalSaved);
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(
+        `Saved! Min Withdraw: ${finalSaved.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${finalSaved.perReferRewardCoins.toLocaleString()} coins`,
+      );
+      return true;
+    }
+
+    showToast(formatSyncErrorMessage(fsErr, 'Failed to save economy settings.'));
+    return false;
+  };
+
   const handleSaveMaintenanceConfig = async (
     cfg: Omit<MaintenanceConfig, 'updatedAtMs'>,
   ): Promise<MaintenanceConfig | null> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required.');
+      return null;
+    }
     let saved: MaintenanceConfig | null = null;
     let fsErr: unknown = null;
     try {
@@ -3631,6 +3986,13 @@ export default function App() {
     error?: string;
     summary?: string;
   }> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      const msg = 'Admin passcode verification required before executing System Data Reset.';
+      showToast(msg);
+      return { ok: false, error: msg };
+    }
     if (dataResetInFlightRef.current) {
       return { ok: false, error: 'A system data reset is already in progress.' };
     }
@@ -3697,17 +4059,14 @@ export default function App() {
     try {
       const tgInitData = getTelegramInitData();
       const sessionToken = adminSessionTokenRef.current;
-      if (!sessionToken && !tgInitData && isAuthorizedAdmin && adminUnlocked) {
-        return await runFirestoreResetFallback();
-      }
 
-      onProgress?.('Requesting server Data Reset (up to 20s)...');
+      onProgress?.('Requesting server Data Reset (up to 30s)...');
       const controller = new AbortController();
       let requestTimedOut = false;
       const requestTimeoutId = window.setTimeout(() => {
         requestTimedOut = true;
         controller.abort();
-      }, 20_000);
+      }, 30_000);
 
       try {
         const headers: Record<string, string> = { 'Content-Type': 'application/json' };
@@ -3749,10 +4108,10 @@ export default function App() {
             return { ok: false, error: errMsg };
           }
           if (res.status === 401 || res.status === 403) {
-            if (isAuthorizedAdmin && adminUnlocked) {
-              return await runFirestoreResetFallback('Server admin token expired');
-            }
-            const errMsg = payload.error || `Data Reset denied (HTTP ${res.status}).`;
+            setAdminUnlocked(false);
+            setAdminSessionToken('');
+            const errMsg =
+              payload.error || 'Admin verification expired — please unlock Admin Console again.';
             showToast(errMsg);
             return { ok: false, error: errMsg };
           }
@@ -3766,7 +4125,7 @@ export default function App() {
       } catch (err) {
         window.clearTimeout(requestTimeoutId);
         const reason = requestTimedOut
-          ? 'Server Data Reset timed out after 20s'
+          ? 'Server Data Reset timed out after 30s'
           : err instanceof Error && err.message
             ? `Server request failed (${err.message})`
             : 'Unable to reach live Node server';
@@ -3818,7 +4177,7 @@ export default function App() {
 
   const handleVerifyAdminPasscode = async (
     passcode: string,
-  ): Promise<{ ok: boolean; error?: string }> => {
+  ): Promise<{ ok: boolean; error?: string; needsPasscodeSetup?: boolean }> => {
     try {
       const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
       const endpointUrl = resolveApiUrl('/api/admin/auth');
@@ -3837,7 +4196,8 @@ export default function App() {
       const payload = (isJson ? await response.json().catch(() => ({})) : {}) as {
         ok?: boolean;
         token?: string;
-        passcodeSource?: 'database' | 'server_file' | 'env' | 'default';
+        needsPasscodeSetup?: boolean;
+        passcodeSource?: 'database' | 'server_file' | 'env' | 'default' | 'unconfigured';
         passcodeUpdatedAtMs?: number;
         error?: string;
       };
@@ -3847,7 +4207,11 @@ export default function App() {
       if (typeof payload.passcodeUpdatedAtMs === 'number') {
         setAdminPasscodeUpdatedAtMs(payload.passcodeUpdatedAtMs);
       }
+      if (typeof payload.needsPasscodeSetup === 'boolean') {
+        setAdminNeedsPasscodeSetup(payload.needsPasscodeSetup);
+      }
       if (response.ok && payload.ok) {
+        setAdminNeedsPasscodeSetup(false);
         if (payload.token) {
           setAdminSessionToken(payload.token);
         }
@@ -3858,37 +4222,76 @@ export default function App() {
         return { ok: true };
       }
 
-      // If the preview/shared host is serving static assets without the Express /api server (HTTP 404/405/HTML),
-      // verify against the deterministic SHA-256 digest for already-authorized Admin IDs.
       const isMissingApiEndpoint = response.status === 404 || response.status === 405 || !isJson;
       if (isMissingApiEndpoint) {
-        if (!isAuthorizedAdmin) {
-          return {
-            ok: false,
-            error: 'Only authorized Admin IDs can unlock the Admin Console.',
-          };
-        }
-        if (verifyStaticHostAdminPasscode(passcode)) {
-          setAdminPasscodeSource('default');
-          setAdminUnlocked(true);
-          playClaimSound(soundsEnabled);
-          triggerHapticFeedback('success');
-          showToast('Admin Console unlocked!');
-          return { ok: true };
-        }
         return {
           ok: false,
-          error: 'Incorrect Admin Passcode. Please try again.',
+          error: 'Admin verification server unavailable. Open from the live Alpha Gram backend host.',
         };
       }
 
       return {
         ok: false,
+        needsPasscodeSetup: payload.needsPasscodeSetup,
         error:
           payload.error ||
           (response.status >= 500
             ? 'Server error while verifying Admin Passcode.'
             : 'Incorrect Admin Passcode. Please try again.'),
+      };
+    } catch {
+      return {
+        ok: false,
+        error: 'Unable to reach verification server. Please check your connection.',
+      };
+    }
+  };
+
+  const handleSetupInitialAdminPasscode = async (
+    passcode: string,
+  ): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
+      const response = await fetch(resolveApiUrl('/api/admin/setup-passcode'), {
+        method: 'POST',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          playerId: effectivePlayerId,
+          initData: getTelegramInitData(),
+          passcode: passcode.trim(),
+        }),
+      });
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      const payload = (
+        contentType.includes('application/json') ? await response.json().catch(() => ({})) : {}
+      ) as {
+        ok?: boolean;
+        token?: string;
+        passcodeSource?: 'database' | 'server_file' | 'env' | 'default' | 'unconfigured';
+        passcodeUpdatedAtMs?: number;
+        error?: string;
+      };
+      if (response.ok && payload.ok) {
+        setAdminNeedsPasscodeSetup(false);
+        if (payload.passcodeSource) {
+          setAdminPasscodeSource(payload.passcodeSource);
+        }
+        if (typeof payload.passcodeUpdatedAtMs === 'number') {
+          setAdminPasscodeUpdatedAtMs(payload.passcodeUpdatedAtMs);
+        }
+        if (payload.token) {
+          setAdminSessionToken(payload.token);
+        }
+        setAdminUnlocked(true);
+        playClaimSound(soundsEnabled);
+        triggerHapticFeedback('success');
+        showToast('Initial Admin Passcode saved & unlocked!');
+        return { ok: true };
+      }
+      return {
+        ok: false,
+        error: payload.error || 'Unable to set initial Admin Passcode.',
       };
     } catch {
       return {
@@ -4437,9 +4840,9 @@ export default function App() {
   }, [adminSessionToken, telegramBotConfig.appShortName]);
 
   useEffect(() => {
-    if (!adminUnlocked) return;
+    if (!adminUnlocked || !adminSessionToken) return;
     void handleFetchBotConfig();
-  }, [adminUnlocked, handleFetchBotConfig]);
+  }, [adminSessionToken, adminUnlocked, handleFetchBotConfig]);
 
   const handleSaveBotToken = async (botToken: string) => {
     const saveViaDirectTelegramPreview = async () => {
@@ -4703,6 +5106,12 @@ export default function App() {
   const handleSaveWithdrawApproveTemplate = async (
     tpl: Omit<WithdrawApproveMessageTemplate, 'updatedAtMs'>,
   ): Promise<boolean> => {
+    if (!hasVerifiedAdminSession()) {
+      setAdminUnlocked(false);
+      setAdminSessionToken('');
+      showToast('Admin passcode verification required before editing payout templates.');
+      return false;
+    }
     let firestoreSaved: WithdrawApproveMessageTemplate | null = null;
     let firestoreErr: unknown = null;
     try {
@@ -5109,20 +5518,23 @@ export default function App() {
   };
 
   const handleClaimDaily = () => {
-    const now = Date.now();
-    const res = claimDailyStreak(profile, todayStr, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playClaimSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerRewardConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast(`Daily login claimed: +${res.rewardCoins} coins!`);
+    void (async () => {
+      if (!(await ensureMustJoinVerified('claim daily login'))) return;
+      const now = Date.now();
+      const res = claimDailyStreak(latestProfileRef.current, todayStr, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(`Daily login claimed: +${res.rewardCoins} coins!`);
+    })();
   };
 
   const handleAfterPromoAdCompleted = useCallback(
@@ -5154,16 +5566,17 @@ export default function App() {
 
   const handleClaimPromo = (code: string) => {
     if (watchingAdLoading) return;
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const dryRun = claimPromoCode(current, code, now, promoCodes);
-    if ('error' in dryRun) {
-      showToast(dryRun.error);
-      return;
-    }
-
-    const cleanCode = code.trim().toUpperCase();
     void (async () => {
+      if (!(await ensureMustJoinVerified('claim promo gift'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const dryRun = claimPromoCode(current, code, now, promoCodes);
+      if ('error' in dryRun) {
+        showToast(dryRun.error);
+        return;
+      }
+
+      const cleanCode = code.trim().toUpperCase();
       setWatchingAdLoading(true);
       setActiveAdNetwork(null);
       try {
@@ -5247,9 +5660,29 @@ export default function App() {
     subView,
   ]);
 
-  const handleCompleteTask = (taskId: string) => {
+  const handleCompleteTask = async (taskId: string) => {
+    if (!(await ensureMustJoinVerified('complete tasks'))) return;
+    const task = mergeTaskDefinitions(customTasks).find((t) => t.id === taskId);
+    const checkMode = task ? getTaskChannelCheckMode(task) : 'none';
+    if (task && checkMode !== 'none') {
+      const proofAt = verifiedChannelTaskProofRef.current[taskId] ?? 0;
+      const hasFreshProof = proofAt > 0 && Date.now() - proofAt <= 60_000;
+      delete verifiedChannelTaskProofRef.current[taskId];
+      if (!hasFreshProof) {
+        const verifyRes = await handleVerifyTaskChannel(task.actionUrl || '', {
+          requireChannelCheck: true,
+          channelCheckMode: checkMode,
+          taskId,
+        });
+        delete verifiedChannelTaskProofRef.current[taskId];
+        if (!verifyRes.joined) {
+          return;
+        }
+      }
+    }
+
     const now = Date.now();
-    const res = completeTask(profile, taskId, now, customTasks);
+    const res = completeTask(latestProfileRef.current, taskId, now, customTasks);
     if ('error' in res) {
       showToast(res.error);
       return;
@@ -5322,6 +5755,7 @@ export default function App() {
 
   const handleTriggerWatchAd = async () => {
     if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('watch ads'))) return;
     setWatchingAdLoading(true);
     setActiveAdNetwork(null);
     setActiveAdAction('watch_ad');
@@ -5350,6 +5784,7 @@ export default function App() {
 
   const handleTriggerAdNetwork = async (network: AdNetworkId) => {
     if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('claim ad rewards'))) return;
     setWatchingAdLoading(true);
     setActiveAdNetwork(network);
     setActiveAdAction('ad_network');
@@ -5382,6 +5817,7 @@ export default function App() {
 
   const handleTriggerAdsgramTask = async () => {
     if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('claim AdsGram rewards'))) return;
     setWatchingAdLoading(true);
     setActiveAdNetwork(null);
     setActiveAdAction('adsgram_task');
@@ -5412,36 +5848,42 @@ export default function App() {
   };
 
   const handleUpgradeBasket = () => {
-    const now = Date.now();
-    const res = upgradeBasket(profile, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playPurchaseSuccessSound(soundsEnabled);
-    triggerHapticFeedback('medium');
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast(`Basket upgraded to ${res.profile.basketTierHours}h (${res.profile.basketCapacity} eggs)!`);
+    void (async () => {
+      if (!(await ensureMustJoinVerified('upgrade basket'))) return;
+      const now = Date.now();
+      const res = upgradeBasket(latestProfileRef.current, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playPurchaseSuccessSound(soundsEnabled);
+      triggerHapticFeedback('medium');
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(`Basket upgraded to ${res.profile.basketTierHours}h (${res.profile.basketCapacity} eggs)!`);
+    })();
   };
 
   const handleActivateBooster = () => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const res = activateFeedBooster(current, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playPurchaseSuccessSound(soundsEnabled);
-    triggerHapticFeedback('medium');
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast('2× Laying Feed activated for 1 hour!');
+    void (async () => {
+      if (!(await ensureMustJoinVerified('activate 2× booster'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = activateFeedBooster(current, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playPurchaseSuccessSound(soundsEnabled);
+      triggerHapticFeedback('medium');
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast('2× Laying Feed activated for 1 hour!');
+    })();
   };
 
   const handleClaimCoopFeverAd = () => {
@@ -5463,6 +5905,7 @@ export default function App() {
 
   const handleTriggerCoopFeverAd = async () => {
     if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('charge 3× Coop Fever'))) return;
     const now = Date.now();
     const prog = getCoopFeverProgress(latestProfileRef.current, now);
     if (prog.active) {
@@ -5499,42 +5942,48 @@ export default function App() {
   };
 
   const handleActivateCoopFever = () => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const res = activateCoopFever(current, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playGoldenEggSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerRewardConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast('Coop Fever 3× Golden Rush activated for 10 minutes!');
+    void (async () => {
+      if (!(await ensureMustJoinVerified('activate 3× Coop Fever'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = activateCoopFever(current, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playGoldenEggSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast('Coop Fever 3× Golden Rush activated for 10 minutes!');
+    })();
   };
 
   const handlePurchaseAutoHarvestDrone = (
     durationId: AutoHarvestDurationId,
     currency: AutoHarvestCurrency,
   ) => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const res = purchaseAutoHarvestDrone(current, durationId, currency, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playPurchaseSuccessSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerRewardConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast(`Auto-Harvest Drone active (${res.tier.label})!`);
+    void (async () => {
+      if (!(await ensureMustJoinVerified('deploy Auto-Harvest Drone'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = purchaseAutoHarvestDrone(current, durationId, currency, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playPurchaseSuccessSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(`Auto-Harvest Drone active (${res.tier.label})!`);
+    })();
   };
 
   const handleToggleTelegramReminders = useCallback(() => {
@@ -5558,6 +6007,7 @@ export default function App() {
   const autoHarvestBusyRef = useRef(false);
   useEffect(() => {
     if (!isPlayerSynced || isBanned || autoHarvestBusyRef.current) return;
+    if (mustJoinGateEnabled && !membershipVerified) return;
     const current = latestProfileRef.current;
     const now = Date.now();
     if (!isAutoHarvestDroneActive(current, now)) return;
@@ -5587,6 +6037,8 @@ export default function App() {
   }, [
     isBanned,
     isPlayerSynced,
+    membershipVerified,
+    mustJoinGateEnabled,
     nowMs,
     persistMutation,
     profile.autoHarvestUntilMs,
@@ -5665,6 +6117,7 @@ export default function App() {
       showToast('Account blocked — actions are disabled.');
       return;
     }
+    if (!(await ensureMustJoinVerified('claim Golden Egg'))) return;
     if (goldenEggClaimInFlightRef.current) {
       return;
     }
@@ -5753,41 +6206,24 @@ export default function App() {
   };
 
   const handleClaimAchievement = (achievementId: string) => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const res = claimAchievement(current, achievementId, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playClaimSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerRewardConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    showToast(`${res.title} claimed: +${res.rewardCoins} coins!`);
-  };
-
-  const handleClaimReferralMilestone = (targetActive: number) => {
-    const now = Date.now();
-    const current = latestProfileRef.current;
-    const activeRefCount = referrals.filter((r) => r.status !== 'pending').length;
-    const res = claimReferralMilestone(current, targetActive, activeRefCount, now);
-    if ('error' in res) {
-      showToast(res.error);
-      return;
-    }
-    playClaimSound(soundsEnabled);
-    triggerHapticFeedback('success');
-    triggerRewardConfetti();
-    void persistMutation({
-      nextProfile: res.profile,
-      transaction: res.transaction,
-    });
-    const henNote = res.crate.bonusLeghorns > 0 ? ` & +${res.crate.bonusLeghorns} Hen` : '';
-    showToast(`${res.crate.title} opened: +${res.crate.rewardCoins} coins${henNote}!`);
+    void (async () => {
+      if (!(await ensureMustJoinVerified('claim achievement'))) return;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = claimAchievement(current, achievementId, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(`${res.title} claimed: +${res.rewardCoins} coins!`);
+    })();
   };
 
   const handleChangeLanguage = (language: LanguageCode) => {
@@ -5837,10 +6273,13 @@ export default function App() {
         <AdminPanelView
           playerId={detectedIdentity.playerId || profile.uid}
           adminUnlocked={adminUnlocked}
+          adminSessionToken={adminSessionToken}
           adminPasscodeSource={adminPasscodeSource}
           adminPasscodeUpdatedAtMs={adminPasscodeUpdatedAtMs}
+          adminNeedsPasscodeSetup={adminNeedsPasscodeSetup}
           serverBotConfigured={serverBotConfigured}
           onVerifyAdminPasscode={handleVerifyAdminPasscode}
+          onSetupInitialAdminPasscode={handleSetupInitialAdminPasscode}
           onTestChannels={handleTestChannelsDiagnostic}
           channelDiagnosticLogs={channelDiagnosticLogs}
           loadingChannelLogs={loadingChannelLogs}
@@ -5869,6 +6308,7 @@ export default function App() {
           onDeleteTask={handleDeleteCustomTask}
           onSaveAdConfig={handleSaveAdConfig}
           onSaveChannelsConfig={handleSaveChannelsConfig}
+          onSyncChannels={handleSyncChannelsWithBot}
           onCreatePromoCode={handleCreatePromoCode}
           onTogglePromoCode={handleTogglePromoCode}
           onDeletePromoCode={handleDeletePromoCode}
@@ -5891,6 +6331,8 @@ export default function App() {
           onAdjustWithdrawAds={handleAdjustWithdrawAds}
           taskPricingConfig={taskPricingConfig}
           onSaveTaskPricingConfig={handleSaveTaskPricingConfig}
+          economyConfig={economyConfig}
+          onSaveEconomyConfig={handleSaveEconomyConfig}
           systemResetConfig={systemResetConfig}
           onExecuteDataReset={handleExecuteDataReset}
           maintenanceConfig={maintenanceConfig}
@@ -5941,6 +6383,7 @@ export default function App() {
         <WithdrawView
           profile={profile}
           withdrawals={withdrawals}
+          minWithdrawEggs={economyConfig.minWithdrawEggs}
           channelVerification={channelVerification}
           requiredChannels={activeRequiredChannels}
           channelsGateEnabled={channelsGateEnabled}
@@ -6031,9 +6474,9 @@ export default function App() {
           profile={profile}
           referrals={mergedReferrals}
           transactions={mergedReferralTransactions}
+          perReferRewardCoins={economyConfig.perReferRewardCoins}
           botUsername={telegramBotConfig.botUsername}
           appShortName={telegramBotConfig.appShortName}
-          onClaimReferralMilestone={handleClaimReferralMilestone}
         />
       );
     }
@@ -6164,7 +6607,7 @@ export default function App() {
               <div className="clay-card-mint !rounded-xl px-3 py-2 flex items-center justify-between">
                 <span className="font-bold text-stone-700 dark:text-stone-200">On Friend's 1st Hen</span>
                 <span className="font-extrabold font-mono-num text-emerald-700 dark:text-emerald-300">
-                  +{REFERRER_SIGNUP_BONUS_COINS} Coins
+                  +{economyConfig.perReferRewardCoins.toLocaleString()} Coins
                 </span>
               </div>
               <div className="clay-card-warm !rounded-xl px-3 py-2 flex items-center justify-between">
@@ -6420,6 +6863,10 @@ export default function App() {
               onActivateCoopFever={handleActivateCoopFever}
               onWatchCoopFeverAd={() => void handleTriggerCoopFeverAd()}
               onBuyChickens={() => navigateTab('packs')}
+              onRefreshMembership={() => void handleRefreshMembership()}
+              refreshingMembership={refreshingMembership || checkingChannels}
+              membershipVerified={channelsGateEnabled ? membershipVerified : null}
+              mustJoinRequired={mustJoinGateEnabled}
             />
           </div>
 
@@ -6499,6 +6946,7 @@ export default function App() {
             checking={checkingChannels}
             checkError={channelCheckError}
             pendingPromoCode={pendingPromoClaimCode}
+            mustJoinRequired={mustJoinGateEnabled}
             onCheckChannels={() => void handleCheckChannels()}
             onRetryCheck={() => void handleCheckChannels()}
             onClose={() => {

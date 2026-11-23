@@ -67,7 +67,7 @@ export function buildReferralShareData(
   return {
     title: 'Join Alpha Gram!',
     text: [
-      `🐔✨ Join ${possessiveOwner} Alpha Gram farm and claim +1,000 sign-up bonus coins! (+100 EXTRA referral welcome coins inside)`,
+      `🐔✨ Join ${possessiveOwner} Alpha Gram farm and claim +1,000 sign-up bonus coins!`,
       '',
       '🥚 Hatch hens & collect fresh eggs 24/7 (even offline)',
       '🔥 Charge Coop Fever up to 3× laying speed',
@@ -83,7 +83,7 @@ export function buildTelegramDirectShareUrl(
   referrerName?: string,
 ): string {
   const shareData = buildReferralShareData(referralCode, referralUrl, referrerName);
-  const fullMessage = `${shareData.text || ''}\n\n👇 Tap below to open Alpha Gram & claim +1,100 bonus coins:\n${referralUrl}`;
+  const fullMessage = `${shareData.text || ''}\n\n👇 Tap below to open Alpha Gram & claim +1,000 bonus coins:\n${referralUrl}`;
   return `https://t.me/share/url?text=${encodeURIComponent(fullMessage)}`;
 }
 

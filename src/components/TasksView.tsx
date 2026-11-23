@@ -45,12 +45,15 @@ import {
   FREE_EGGS_PER_AD,
   getAdNetworkClaimCountToday,
   getBotJoinClaimCountToday,
+  getTaskChannelCheckMode,
   getTaskRemainingSlots,
   getWithdrawAdGateStatus,
   mergeTaskDefinitions,
   normalizeTelegramChannelHandle,
   resolveTaskPricingConfig,
+  sanitizeExternalUrl,
   sortTasks,
+  type TaskChannelCheckMode,
   USER_TASK_MAX_REWARD_COINS,
   USER_TASK_MIN_REWARD_COINS,
   USER_TASK_MIN_TOPUP_COINS,
@@ -98,12 +101,16 @@ interface TasksViewProps {
   onRetryCheckChannels?: () => Promise<ChannelVerificationResult | null> | void;
   onVerifyTaskChannel?: (
     actionUrl: string,
-    options?: { requireChannelCheck?: boolean },
+    options?: {
+      requireChannelCheck?: boolean;
+      channelCheckMode?: TaskChannelCheckMode;
+      taskId?: string;
+    },
   ) => Promise<{ joined: boolean; handle?: string; status?: string; reason?: string }>;
   onTabTap?: () => void;
   onClaimPromo: (code: string) => void;
   onClaimDaily: () => void;
-  onCompleteTask: (taskId: string) => void;
+  onCompleteTask: (taskId: string) => void | Promise<void>;
   onTriggerWatchAd: () => void;
   onTriggerAdNetwork: (network: AdNetworkId) => void;
   onTriggerAdsgramTask?: () => void;
@@ -190,27 +197,11 @@ export function TasksView({
       return {};
     }
   });
-  const [taskStages, setTaskStages] = useState<Record<string, TaskCheckStage>>(() => {
-    if (typeof window === 'undefined') return {};
-    try {
-      const raw = localStorage.getItem(`${VERIFIED_TASKS_STORAGE_PREFIX}${profile.uid}`);
-      const parsed = raw ? (JSON.parse(raw) as Record<string, string>) : {};
-      const initial: Record<string, TaskCheckStage> = {};
-      if (parsed && typeof parsed === 'object') {
-        for (const [k, v] of Object.entries(parsed)) {
-          if (v === 'verified' && !profile.completedTaskIds.includes(k)) {
-            initial[k] = 'ready';
-          }
-        }
-      }
-      return initial;
-    } catch {
-      return {};
-    }
-  });
+  const [taskStages, setTaskStages] = useState<Record<string, TaskCheckStage>>({});
   const [taskRetryHandles, setTaskRetryHandles] = useState<Record<string, string>>({});
   const [taskRetryReasons, setTaskRetryReasons] = useState<Record<string, string>>({});
   const checkTimersRef = useRef<Record<string, number>>({});
+  const verifyingTaskIdsRef = useRef<Set<string>>(new Set());
   const pendingReturnTaskIdRef = useRef<string | null>(null);
 
   // Pull-to-refresh & 60s auto-refresh state
@@ -435,17 +426,49 @@ export function TasksView({
     [profile.uid],
   );
 
-  // Sync verifiedTasks state when profile.uid changes (e.g. TG SDK hydration or system reset)
+  const clearTaskVerifiedLocally = useCallback(
+    (taskId: string) => {
+      setVerifiedTasks((prev) => {
+        if (!(taskId in prev)) return prev;
+        const next = { ...prev };
+        delete next[taskId];
+        try {
+          localStorage.setItem(`${VERIFIED_TASKS_STORAGE_PREFIX}${profile.uid}`, JSON.stringify(next));
+        } catch {
+          // ignore storage errors
+        }
+        return next;
+      });
+    },
+    [profile.uid],
+  );
+
+  // Sync verifiedTasks state ONLY for non-channel-checked tasks; channel-checked tasks always verify live on Claim
   useEffect(() => {
     try {
       const raw = localStorage.getItem(`${VERIFIED_TASKS_STORAGE_PREFIX}${profile.uid}`);
       const parsed = raw ? (JSON.parse(raw) as Record<string, 'verified'>) : {};
       const safe = parsed && typeof parsed === 'object' ? parsed : {};
-      setVerifiedTasks(safe);
+      const taskById = new Map(allTasks.map((t) => [t.id, t]));
+      const filteredSafe: Record<string, 'verified'> = {};
+      for (const [k, v] of Object.entries(safe)) {
+        const matched = taskById.get(k);
+        if (v === 'verified' && (!matched || getTaskChannelCheckMode(matched) === 'none')) {
+          filteredSafe[k] = 'verified';
+        }
+      }
+      setVerifiedTasks(filteredSafe);
       setTaskStages((prev) => {
         const next = { ...prev };
-        for (const [k, v] of Object.entries(safe)) {
-          if (v === 'verified' && !profile.completedTaskIds.includes(k) && (!next[k] || next[k] === 'idle')) {
+        for (const [k, v] of Object.entries(filteredSafe)) {
+          const matched = taskById.get(k);
+          if (
+            v === 'verified' &&
+            matched &&
+            getTaskChannelCheckMode(matched) === 'none' &&
+            !profile.completedTaskIds.includes(k) &&
+            (!next[k] || next[k] === 'idle')
+          ) {
             next[k] = 'ready';
           }
         }
@@ -454,14 +477,14 @@ export function TasksView({
     } catch {
       setVerifiedTasks({});
     }
-  }, [profile.uid, profile.completedTaskIds]);
+  }, [allTasks, profile.uid, profile.completedTaskIds]);
 
   const startCheckingFlow = (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
     if (task.id === 'daily_reinvest') {
       onTabTap?.();
       if (profile.lastReinvestDate === todayStr) {
-        onCompleteTask(task.id);
+        void onCompleteTask(task.id);
       } else {
         onOpenReinvest?.();
       }
@@ -475,10 +498,11 @@ export function TasksView({
 
     onTabTap?.();
 
-    if (task.actionUrl) {
-      const handledByTg = notifyTelegramOpenLink(task.actionUrl);
+    const safeActionUrl = sanitizeExternalUrl(task.actionUrl);
+    if (safeActionUrl) {
+      const handledByTg = notifyTelegramOpenLink(safeActionUrl);
       if (!handledByTg && typeof window !== 'undefined') {
-        window.open(task.actionUrl, '_blank', 'noopener,noreferrer');
+        window.open(safeActionUrl, '_blank', 'noopener,noreferrer');
       }
     }
 
@@ -501,7 +525,7 @@ export function TasksView({
     }
     checkTimersRef.current[task.id] = window.setTimeout(() => {
       delete checkTimersRef.current[task.id];
-      if (!task.requireChannelCheck) {
+      if (getTaskChannelCheckMode(task) === 'none') {
         markTaskVerifiedLocally(task.id);
       }
       setTaskStages((prev) => ({ ...prev, [task.id]: 'ready' }));
@@ -528,7 +552,7 @@ export function TasksView({
       }
 
       pendingReturnTaskIdRef.current = null;
-      if (!targetTask.requireChannelCheck) {
+      if (getTaskChannelCheckMode(targetTask) === 'none') {
         markTaskVerifiedLocally(pendingId);
       }
       setTaskStages((prev) => ({ ...prev, [pendingId]: 'ready' }));
@@ -539,22 +563,33 @@ export function TasksView({
 
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
+    if (verifyingTaskIdsRef.current.has(task.id)) return;
     if (pendingReturnTaskIdRef.current === task.id) {
       pendingReturnTaskIdRef.current = null;
     }
 
-    // Live-verify Telegram channel membership on Claim/Retry when Enable Channel Check is active
-    const shouldCheckChannel = Boolean(
-      onVerifyTaskChannel && task.actionUrl && task.requireChannelCheck,
-    );
+    const checkMode = getTaskChannelCheckMode(task);
+    const shouldCheckChannel = checkMode !== 'none';
 
-    if (shouldCheckChannel && onVerifyTaskChannel && task.actionUrl) {
+    if (shouldCheckChannel) {
+      if (!onVerifyTaskChannel || !task.actionUrl) {
+        setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
+        setTaskRetryReasons((prev) => ({
+          ...prev,
+          [task.id]: 'Live channel verification unavailable right now — please Retry.',
+        }));
+        return;
+      }
+      verifyingTaskIdsRef.current.add(task.id);
       setTaskStages((prev) => ({ ...prev, [task.id]: 'verifying' }));
       try {
         const taskCheck = await onVerifyTaskChannel(task.actionUrl, {
           requireChannelCheck: true,
+          channelCheckMode: checkMode,
+          taskId: task.id,
         });
         if (!taskCheck.joined) {
+          clearTaskVerifiedLocally(task.id);
           setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
           if (taskCheck.handle) {
             setTaskRetryHandles((prev) => ({ ...prev, [task.id]: taskCheck.handle! }));
@@ -574,16 +609,18 @@ export function TasksView({
           }
           return;
         }
-        markTaskVerifiedLocally(task.id);
       } catch {
+        clearTaskVerifiedLocally(task.id);
         setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
         return;
+      } finally {
+        verifyingTaskIdsRef.current.delete(task.id);
       }
     } else {
       markTaskVerifiedLocally(task.id);
     }
 
-    onCompleteTask(task.id);
+    await onCompleteTask(task.id);
     setTaskStages((prev) => {
       const next = { ...prev };
       delete next[task.id];
@@ -810,6 +847,7 @@ export function TasksView({
         : 0;
     const isLowSlots = hasSlotCounter && remainingSlots > 0 && slotPct <= 25;
     const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
+    const hasChannelCheck = getTaskChannelCheckMode(task) !== 'none';
     const spotsLeftLabel = `${remainingSlots?.toLocaleString() ?? 0}/${totalSlots.toLocaleString()} spots left`;
     const stage = taskStages[task.id] ?? 'idle';
 
@@ -838,7 +876,7 @@ export function TasksView({
                     Paid
                   </span>
                 )}
-                {task.requireChannelCheck && (
+                {hasChannelCheck && (
                   <span className="rounded-md bg-sky-100/80 dark:bg-sky-950/60 border border-sky-300/70 dark:border-sky-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-sky-800 dark:text-sky-300 shrink-0">
                     Verified
                   </span>
@@ -950,7 +988,7 @@ export function TasksView({
               <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300 flex items-center gap-1.5 px-0.5">
                 <Check className="w-3 h-3" />
                 <span>
-                  {task.requireChannelCheck && verifiedTasks[task.id] !== 'verified'
+                  {hasChannelCheck
                     ? `Tap Claim to verify join & get +${task.rewardCoins.toLocaleString()} coins`
                     : `${verifiedTasks[task.id] === 'verified' ? 'Verified! ' : ''}Tap Claim to receive +${task.rewardCoins.toLocaleString()} coins`}
                 </span>
@@ -980,7 +1018,9 @@ export function TasksView({
     () => normalizeTelegramChannelHandle(newActionUrl).handle,
     [newActionUrl],
   );
-  const channelCheckUrlInvalid = newRequireChannelCheck && !parsedChannelHandle;
+  const channelCheckUrlInvalid =
+    newRequireChannelCheck &&
+    (!parsedChannelHandle || /[?&]start(app)?=/i.test(newActionUrl));
   const budgetPreview = calculatePaidTaskFromBudget(
     parsedBudgetCoins,
     parsedRewardCoins,
@@ -1173,13 +1213,14 @@ export function TasksView({
               <div className="text-xs text-stone-500 dark:text-stone-400 truncate">{adConfig.bannerSubtitle}</div>
             )}
           </div>
-          {adConfig.bannerUrl && (
+          {sanitizeExternalUrl(adConfig.bannerUrl) && (
             <a
-              href={adConfig.bannerUrl}
+              href={sanitizeExternalUrl(adConfig.bannerUrl)!}
               target="_blank"
               rel="noopener noreferrer"
               onClick={(e) => {
-                if (notifyTelegramOpenLink(adConfig.bannerUrl)) {
+                const safeBannerUrl = sanitizeExternalUrl(adConfig.bannerUrl);
+                if (safeBannerUrl && notifyTelegramOpenLink(safeBannerUrl)) {
                   e.preventDefault();
                 }
               }}
@@ -1201,21 +1242,24 @@ export function TasksView({
             </div>
             <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Gift &amp; Promo Code</div>
           </div>
-          <a
-            href={resolvedGetCodeUrl}
-            target="_blank"
-            rel="noopener noreferrer"
-            onClick={(e) => {
-              onTabTap?.();
-              if (notifyTelegramOpenLink(resolvedGetCodeUrl)) {
-                e.preventDefault();
-              }
-            }}
-            className="clay-btn clay-btn-sky inline-flex items-center gap-1 min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-extrabold shrink-0"
-          >
-            <span>Get code</span>
-            <ExternalLink className="w-3.5 h-3.5" />
-          </a>
+          {sanitizeExternalUrl(resolvedGetCodeUrl) && (
+            <a
+              href={sanitizeExternalUrl(resolvedGetCodeUrl)!}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(e) => {
+                onTabTap?.();
+                const safeCodeUrl = sanitizeExternalUrl(resolvedGetCodeUrl);
+                if (safeCodeUrl && notifyTelegramOpenLink(safeCodeUrl)) {
+                  e.preventDefault();
+                }
+              }}
+              className="clay-btn clay-btn-sky inline-flex items-center gap-1 min-h-[38px] px-3.5 py-1.5 rounded-xl text-xs font-extrabold shrink-0"
+            >
+              <span>Get code</span>
+              <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          )}
         </div>
 
         <form

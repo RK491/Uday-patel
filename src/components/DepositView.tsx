@@ -18,6 +18,7 @@ import {
   DEFAULT_GRAM_JETTON_MASTER,
   MAX_DEPOSIT_COINS,
   MIN_DEPOSIT_COINS,
+  sanitizeExternalUrl,
 } from '../game/economy';
 import {
   buildGramTransferUrl,
@@ -419,22 +420,26 @@ export function DepositView({
             <div className="clay-icon-well p-3 rounded-3xl">
               <QRCodeSvg value={tonTransferDeepLink} className="w-36 h-36" />
             </div>
-            <a
-              href={tonTransferDeepLink}
-              className="clay-btn clay-btn-sky w-full max-w-[190px] min-h-[42px] rounded-2xl inline-flex items-center justify-center gap-1.5 text-xs font-extrabold px-3"
-            >
-              <span>Pay via TON Wallet</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </a>
-            <a
-              href={tonkeeperDeepLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 dark:text-sky-400 hover:underline"
-            >
-              <span>Open in Tonkeeper Web</span>
-              <ExternalLink className="w-3 h-3" />
-            </a>
+            {sanitizeExternalUrl(tonTransferDeepLink, { allowDeepLinks: true }) && (
+              <a
+                href={sanitizeExternalUrl(tonTransferDeepLink, { allowDeepLinks: true })!}
+                className="clay-btn clay-btn-sky w-full max-w-[190px] min-h-[42px] rounded-2xl inline-flex items-center justify-center gap-1.5 text-xs font-extrabold px-3"
+              >
+                <span>Pay via TON Wallet</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
+            )}
+            {sanitizeExternalUrl(tonkeeperDeepLink) && (
+              <a
+                href={sanitizeExternalUrl(tonkeeperDeepLink)!}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] font-bold text-sky-700 dark:text-sky-400 hover:underline"
+              >
+                <span>Open in Tonkeeper Web</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            )}
           </div>
         </div>
 

@@ -653,11 +653,23 @@ export function getTelegramChannelUrl(channelHandle: string): string {
 
 export function notifyTelegramOpenLink(channelUrl: string): boolean {
   if (typeof window === 'undefined') return false;
+  const trimmed = String(channelUrl || '').trim();
+  if (!trimmed) return false;
+  let safeUrl = '';
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:' || parsed.protocol === 'tg:') {
+      safeUrl = parsed.toString();
+    }
+  } catch {
+    return false;
+  }
+  if (!safeUrl) return false;
   const win = window as unknown as TelegramWindow;
   const openTg = win.Telegram?.WebApp?.openTelegramLink;
   if (typeof openTg === 'function') {
     try {
-      openTg(channelUrl);
+      openTg(safeUrl);
       return true;
     } catch {
       return false;
@@ -709,7 +721,7 @@ export function subscribeTelegramAppActivated(callback: () => void): () => void 
 }
 
 
-const LOCAL_ADMIN_BOT_STORAGE_KEY = 'chickenland_admin_local_bot_v1';
+const LEGACY_LOCAL_ADMIN_BOT_STORAGE_KEY = 'chickenland_admin_local_bot_v1';
 const LOCAL_CHANNEL_LOGS_STORAGE_KEY = 'chickenland_local_channel_logs_v1';
 
 export interface LocalAdminBotConfig {
@@ -718,6 +730,19 @@ export interface LocalAdminBotConfig {
   botUsername: string;
   botId: number | null;
   updatedAtMs: number;
+}
+
+// Keep preview-only fallback bot token in page memory (never persist plaintext bot credentials in localStorage).
+let memoryLocalAdminBotConfig: LocalAdminBotConfig | null = null;
+
+function scrubLegacyLocalAdminBotStorage(): void {
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localStorage.removeItem(LEGACY_LOCAL_ADMIN_BOT_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage access errors
+  }
 }
 
 export function sanitizeTelegramBotTokenInput(raw: unknown): string {
@@ -735,41 +760,37 @@ export function maskTelegramBotToken(token: string): string {
 }
 
 export function getLocalAdminBotConfig(): LocalAdminBotConfig | null {
-  try {
-    if (typeof localStorage === 'undefined') return null;
-    const raw = localStorage.getItem(LOCAL_ADMIN_BOT_STORAGE_KEY);
-    if (!raw) return null;
-    const parsed = JSON.parse(raw) as Partial<LocalAdminBotConfig> | null;
-    const cleanToken = sanitizeTelegramBotTokenInput(parsed?.token);
-    if (!cleanToken) return null;
-    return {
-      token: cleanToken,
-      maskedToken: parsed?.maskedToken || maskTelegramBotToken(cleanToken),
-      botUsername: normalizeTelegramBotUsername(parsed?.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME,
-      botId: typeof parsed?.botId === 'number' ? parsed.botId : null,
-      updatedAtMs: Number(parsed?.updatedAtMs || Date.now()),
-    };
-  } catch {
-    return null;
-  }
+  scrubLegacyLocalAdminBotStorage();
+  if (!memoryLocalAdminBotConfig) return null;
+  const cleanToken = sanitizeTelegramBotTokenInput(memoryLocalAdminBotConfig.token);
+  if (!cleanToken) return null;
+  return {
+    token: cleanToken,
+    maskedToken: memoryLocalAdminBotConfig.maskedToken || maskTelegramBotToken(cleanToken),
+    botUsername: normalizeTelegramBotUsername(memoryLocalAdminBotConfig.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME,
+    botId: typeof memoryLocalAdminBotConfig.botId === 'number' ? memoryLocalAdminBotConfig.botId : null,
+    updatedAtMs: Number(memoryLocalAdminBotConfig.updatedAtMs || Date.now()),
+  };
 }
 
 export function setLocalAdminBotConfig(cfg: LocalAdminBotConfig): void {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.setItem(LOCAL_ADMIN_BOT_STORAGE_KEY, JSON.stringify(cfg));
-  } catch {
-    // Ignore storage quota errors
+  scrubLegacyLocalAdminBotStorage();
+  const cleanToken = sanitizeTelegramBotTokenInput(cfg.token);
+  if (!cleanToken) {
+    memoryLocalAdminBotConfig = null;
+    return;
   }
+  memoryLocalAdminBotConfig = {
+    ...cfg,
+    token: cleanToken,
+    maskedToken: cfg.maskedToken || maskTelegramBotToken(cleanToken),
+    botUsername: normalizeTelegramBotUsername(cfg.botUsername) || DEFAULT_TELEGRAM_BOT_USERNAME,
+  };
 }
 
 export function clearLocalAdminBotConfig(): void {
-  try {
-    if (typeof localStorage === 'undefined') return;
-    localStorage.removeItem(LOCAL_ADMIN_BOT_STORAGE_KEY);
-  } catch {
-    // Ignore storage errors
-  }
+  memoryLocalAdminBotConfig = null;
+  scrubLegacyLocalAdminBotStorage();
 }
 
 export async function verifyTelegramBotTokenDirect(rawToken: string): Promise<{

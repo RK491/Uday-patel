@@ -181,7 +181,7 @@ service cloud.firestore {
         ])
         && isValidId(data.userId)
         && data.userId == playerId
-        && data.eggsAmount is number && data.eggsAmount >= 100
+        && data.eggsAmount is number && data.eggsAmount >= 1
         && data.gramAmount is string && data.gramAmount.size() >= 1 && data.gramAmount.size() <= 40
         && data.usdValue is number && data.usdValue >= 0
         && data.walletAddress is string && data.walletAddress.size() >= 6 && data.walletAddress.size() <= 128
@@ -211,7 +211,7 @@ service cloud.firestore {
         && isValidId(data.userId)
         && data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 60
         && data.handle is string && data.handle.size() >= 1 && data.handle.size() <= 40
-        && data.eggsAmount is number && data.eggsAmount >= 100
+        && data.eggsAmount is number && data.eggsAmount >= 1
         && data.gramAmount is string && data.gramAmount.size() >= 1 && data.gramAmount.size() <= 40
         && data.usdValue is number && data.usdValue >= 0
         && data.walletAddress is string && data.walletAddress.size() >= 6 && data.walletAddress.size() <= 128
@@ -345,21 +345,30 @@ service cloud.firestore {
 
     function isValidChannelsConfig(data) {
       return data.keys().hasAll(['enabled', 'channels', 'updatedAtMs', 'updatedAt'])
-        && data.keys().hasOnly(['enabled', 'channels', 'getCodeChannelUrl', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['enabled', 'mustJoin', 'channels', 'getCodeChannelUrl', 'updatedAtMs', 'updatedAt'])
         && data.enabled is bool
+        && (!('mustJoin' in data) || data.mustJoin is bool)
         && (!('getCodeChannelUrl' in data) || (data.getCodeChannelUrl is string && data.getCodeChannelUrl.size() <= 256))
         && data.channels is list
         && data.channels.size() <= 10
         && (data.channels.size() == 0 || (
           data.channels[0] is map
           && data.channels[0].keys().hasAll(['id', 'handle', 'title', 'description', 'url', 'enabled'])
-          && data.channels[0].keys().hasOnly(['id', 'handle', 'title', 'description', 'url', 'enabled'])
+          && data.channels[0].keys().hasOnly([
+            'id', 'handle', 'chatId', 'title', 'description', 'url', 'enabled',
+            'memberCount', 'botIsAdmin', 'botStatus', 'lastSyncedAtMs'
+          ])
           && data.channels[0].id is string && data.channels[0].id.size() >= 1 && data.channels[0].id.size() <= 48
           && data.channels[0].handle is string && data.channels[0].handle.size() >= 2 && data.channels[0].handle.size() <= 64
+          && (!('chatId' in data.channels[0]) || (data.channels[0].chatId is string && data.channels[0].chatId.size() <= 64))
           && data.channels[0].title is string && data.channels[0].title.size() <= 60
           && data.channels[0].description is string && data.channels[0].description.size() <= 140
           && data.channels[0].url is string && data.channels[0].url.size() <= 256
           && data.channels[0].enabled is bool
+          && (!('memberCount' in data.channels[0]) || (data.channels[0].memberCount is number && data.channels[0].memberCount >= 0))
+          && (!('botIsAdmin' in data.channels[0]) || data.channels[0].botIsAdmin is bool)
+          && (!('botStatus' in data.channels[0]) || (data.channels[0].botStatus is string && data.channels[0].botStatus.size() <= 32))
+          && (!('lastSyncedAtMs' in data.channels[0]) || (data.channels[0].lastSyncedAtMs is number && data.channels[0].lastSyncedAtMs >= 0))
         ))
         && data.updatedAtMs is number && data.updatedAtMs >= 0
         && data.updatedAt is timestamp;
@@ -423,6 +432,15 @@ service cloud.firestore {
         && data.message is string && data.message.size() >= 1 && data.message.size() <= 400
         && data.estimatedReturn is string && data.estimatedReturn.size() <= 80
         && data.updatedBy is string && data.updatedBy.size() <= 64
+        && data.updatedAtMs is number && data.updatedAtMs >= 0
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidEconomyConfig(data) {
+      return data.keys().hasAll(['minWithdrawEggs', 'perReferRewardCoins', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['minWithdrawEggs', 'perReferRewardCoins', 'updatedAtMs', 'updatedAt'])
+        && data.minWithdrawEggs is number && data.minWithdrawEggs >= 1 && data.minWithdrawEggs <= 1000000
+        && data.perReferRewardCoins is number && data.perReferRewardCoins >= 0 && data.perReferRewardCoins <= 100000
         && data.updatedAtMs is number && data.updatedAtMs >= 0
         && data.updatedAt is timestamp;
     }
@@ -752,6 +770,9 @@ service cloud.firestore {
           && incoming().updatedAt == request.time)
         || (configId == 'maintenance'
           && isValidMaintenanceConfig(incoming())
+          && incoming().updatedAt == request.time)
+        || (configId == 'economy'
+          && isValidEconomyConfig(incoming())
           && incoming().updatedAt == request.time)
       );
       allow delete: if false;

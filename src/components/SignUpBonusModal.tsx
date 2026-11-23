@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { CheckCircle2, Coins, Gift, Sparkles } from 'lucide-react';
-import { REFERRED_WELCOME_BONUS_COINS, SIGNUP_BONUS_COINS } from '../game/economy';
+import { CheckCircle2, Gift, Sparkles } from 'lucide-react';
+import { SIGNUP_BONUS_COINS } from '../game/economy';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
@@ -9,7 +9,7 @@ interface SignUpBonusModalProps {
   hasReferral?: boolean;
 }
 
-export function SignUpBonusModal({ onClaim, hasReferral = false }: SignUpBonusModalProps) {
+export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
   const [imgFailed, setImgFailed] = useState(false);
 
   return (
@@ -104,18 +104,6 @@ export function SignUpBonusModal({ onClaim, hasReferral = false }: SignUpBonusMo
               </div>
               <CheckCircle2 className="w-6 h-6 text-emerald-600 dark:text-emerald-400 shrink-0" />
             </div>
-
-            {hasReferral && (
-              <div className="clay-card-warm !rounded-2xl px-4 py-2.5 flex items-center justify-between text-xs font-bold text-amber-950 dark:text-amber-200">
-                <span className="inline-flex items-center gap-1.5">
-                  <Coins className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                  <span>Referral Invite Welcome Bonus</span>
-                </span>
-                <span className="font-mono-num font-extrabold">
-                  +{REFERRED_WELCOME_BONUS_COINS} Coins
-                </span>
-              </div>
-            )}
 
             <div className="grid grid-cols-3 gap-2 pt-1 text-left">
               <div className="clay-inset px-2.5 py-2.5 rounded-2xl">

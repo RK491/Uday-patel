@@ -70,6 +70,7 @@ import type {
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
+  EconomyConfig,
   MaintenanceConfig,
   PromoRewardType,
   ReferralRecord,
@@ -89,6 +90,7 @@ import {
   CHICKEN_PACKS,
   computeAdminWithdrawAdsAdjustment,
   computeAdminWithdrawAdsTarget,
+  DEFAULT_ECONOMY_CONFIG,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_MAINTENANCE_CONFIG,
   DEFAULT_TASK_PRICING_CONFIG,
@@ -99,9 +101,11 @@ import {
   formatPromoRewardSummary,
   generateGiftCodeString,
   getEffectiveAdminIds,
+  getTaskChannelCheckMode,
   getUnifiedUserId,
   getWithdrawalStatusMeta,
   isAdminPlayerId,
+  isVerifiableTelegramChannelUrl,
   matchesAdminRecord,
   matchesBannedUserRecord,
   MIN_WITHDRAW_ADS_WATCHED,
@@ -111,7 +115,9 @@ import {
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
   renderWithdrawApproveMessage,
+  resolveEconomyConfig,
   resolveTaskPricingConfig,
+  sanitizeExternalUrl,
 } from '../game/economy';
 import { getConfiguredApiBaseUrl, setConfiguredApiBaseUrl } from '../utils/telegram';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -159,10 +165,13 @@ interface BroadcastAudienceStats {
 interface AdminPanelViewProps {
   playerId: string;
   adminUnlocked: boolean;
-  adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default';
+  adminSessionToken?: string;
+  adminPasscodeSource?: 'database' | 'server_file' | 'env' | 'default' | 'unconfigured';
   adminPasscodeUpdatedAtMs?: number;
+  adminNeedsPasscodeSetup?: boolean;
   serverBotConfigured?: boolean;
-  onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
+  onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string; needsPasscodeSetup?: boolean }>;
+  onSetupInitialAdminPasscode?: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
   onTestChannels?: (channels?: RequiredTelegramChannel[]) => Promise<ChannelDiagnosticResult>;
   channelDiagnosticLogs?: ChannelCheckDiagnosticLog[];
   loadingChannelLogs?: boolean;
@@ -200,11 +209,34 @@ interface AdminPanelViewProps {
     icon: string;
     actionUrl: string;
     totalSlots?: number;
+    requireChannelCheck?: boolean;
   }) => Promise<void>;
   onToggleTask: (taskId: string, isActive: boolean) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
   onSaveAdConfig: (config: Omit<AdConfig, 'updatedAtMs'>) => Promise<boolean | void>;
   onSaveChannelsConfig: (config: Omit<ChannelsConfig, 'updatedAtMs'>) => Promise<boolean | void>;
+  onSyncChannels?: (payload?: {
+    enabled?: boolean;
+    mustJoin?: boolean;
+    channels?: RequiredTelegramChannel[];
+    getCodeChannelUrl?: string;
+  }) => Promise<{
+    ok: boolean;
+    botConfigured?: boolean;
+    botUsername?: string | null;
+    channelsConfig?: ChannelsConfig;
+    error?: string;
+    results?: Array<{
+      id: string;
+      handle: string;
+      chatId?: string;
+      title?: string;
+      memberCount?: number | null;
+      botIsAdmin: boolean;
+      botStatus: string;
+      error?: string;
+    }>;
+  }>;
   onCreatePromoCode: (input: {
     code: string;
     label: string;
@@ -295,6 +327,10 @@ interface AdminPanelViewProps {
   onSaveTaskPricingConfig?: (
     config: Omit<TaskPricingConfig, 'updatedAtMs'>,
   ) => Promise<boolean | void>;
+  economyConfig?: EconomyConfig;
+  onSaveEconomyConfig?: (
+    config: Omit<EconomyConfig, 'updatedAtMs'>,
+  ) => Promise<boolean | void>;
   systemResetConfig?: SystemResetConfig;
   onExecuteDataReset?: (
     onProgress?: (stage: string) => void,
@@ -382,10 +418,13 @@ function formatExpiryLabel(hours: number): string {
 export function AdminPanelView({
   playerId,
   adminUnlocked,
-  adminPasscodeSource = 'default',
+  adminSessionToken = '',
+  adminPasscodeSource = 'env',
   adminPasscodeUpdatedAtMs = 0,
+  adminNeedsPasscodeSetup = false,
   serverBotConfigured,
   onVerifyAdminPasscode,
+  onSetupInitialAdminPasscode,
   onTestChannels,
   channelDiagnosticLogs = [],
   loadingChannelLogs = false,
@@ -414,6 +453,7 @@ export function AdminPanelView({
   onDeleteTask,
   onSaveAdConfig,
   onSaveChannelsConfig,
+  onSyncChannels,
   onCreatePromoCode,
   onTogglePromoCode,
   onDeletePromoCode,
@@ -436,6 +476,8 @@ export function AdminPanelView({
   onAdjustWithdrawAds,
   taskPricingConfig = DEFAULT_TASK_PRICING_CONFIG,
   onSaveTaskPricingConfig,
+  economyConfig = DEFAULT_ECONOMY_CONFIG,
+  onSaveEconomyConfig,
   systemResetConfig,
   onExecuteDataReset,
   maintenanceConfig = DEFAULT_MAINTENANCE_CONFIG,
@@ -446,11 +488,29 @@ export function AdminPanelView({
     [adminsConfig],
   );
   const isAuthorizedAdmin = isAdminPlayerId(playerId, extraAdminIds);
+  const hasValidServerAdminSession = Boolean(
+    adminSessionToken &&
+      adminSessionToken.trim().length >= 24 &&
+      adminSessionToken.includes('.'),
+  );
+  const isStrictAdminAuthenticated =
+    isAuthorizedAdmin && adminUnlocked && hasValidServerAdminSession;
 
   const [passcodeInput, setPasscodeInput] = useState('');
   const [showPasscodeInput, setShowPasscodeInput] = useState(false);
   const [passcodeError, setPasscodeError] = useState<string | null>(null);
   const [verifyingPasscode, setVerifyingPasscode] = useState(false);
+
+  const requireStrictAdminAuth = (actionLabel: string): boolean => {
+    if (!isStrictAdminAuthenticated) {
+      setPasscodeError(
+        `Passcode verification required before ${actionLabel}. Please re-verify your Admin Passcode.`,
+      );
+      onLockAdmin?.();
+      return false;
+    }
+    return true;
+  };
 
   type AdminSectionTab =
     | 'withdrawals'
@@ -559,8 +619,71 @@ export function AdminPanelView({
     setTaskFeePercentDraft(String(Math.round(resolvedTaskPricing.platformFeeRate * 100)));
   }, [resolvedTaskPricing]);
 
+  // Economy Settings (Min. Withdraw & Per-Refer Reward)
+  const resolvedEconomy = useMemo(
+    () => resolveEconomyConfig(economyConfig),
+    [economyConfig],
+  );
+  const [minWithdrawEggsDraft, setMinWithdrawEggsDraft] = useState(
+    String(resolvedEconomy.minWithdrawEggs),
+  );
+  const [perReferRewardDraft, setPerReferRewardDraft] = useState(
+    String(resolvedEconomy.perReferRewardCoins),
+  );
+  const [savingEconomy, setSavingEconomy] = useState(false);
+  const [economyFeedback, setEconomyFeedback] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
+
+  useEffect(() => {
+    setMinWithdrawEggsDraft(String(resolvedEconomy.minWithdrawEggs));
+    setPerReferRewardDraft(String(resolvedEconomy.perReferRewardCoins));
+  }, [resolvedEconomy]);
+
+  const handleSaveEconomySubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!requireStrictAdminAuth('updating economy & payout limits')) return;
+    if (!onSaveEconomyConfig || savingEconomy) return;
+    onTabTap?.();
+    setSavingEconomy(true);
+    setEconomyFeedback(null);
+    try {
+      const normalized = resolveEconomyConfig({
+        minWithdrawEggs: Number(minWithdrawEggsDraft),
+        perReferRewardCoins: Number(perReferRewardDraft),
+      });
+      const ok = await onSaveEconomyConfig({
+        minWithdrawEggs: normalized.minWithdrawEggs,
+        perReferRewardCoins: normalized.perReferRewardCoins,
+      });
+      if (ok !== false) {
+        setMinWithdrawEggsDraft(String(normalized.minWithdrawEggs));
+        setPerReferRewardDraft(String(normalized.perReferRewardCoins));
+        setEconomyFeedback({
+          ok: true,
+          text: `Saved live! Min Withdraw: ${normalized.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${normalized.perReferRewardCoins.toLocaleString()} coins.`,
+        });
+      } else {
+        setEconomyFeedback({
+          ok: false,
+          text: 'Could not save economy settings. Check permissions or connection.',
+        });
+      }
+    } catch (err) {
+      setEconomyFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to save economy settings.',
+      });
+    } finally {
+      setSavingEconomy(false);
+    }
+  };
+
   // Data Reset state
   const [resetConfirmInput, setResetConfirmInput] = useState('');
+  const [resetPasscodeInput, setResetPasscodeInput] = useState('');
+  const [showResetPasscode, setShowResetPasscode] = useState(false);
   const [resettingData, setResettingData] = useState(false);
   const [resetElapsedSec, setResetElapsedSec] = useState(0);
   const [resetProgressText, setResetProgressText] = useState('');
@@ -610,6 +733,7 @@ export function AdminPanelView({
   }, [maintenanceConfig]);
 
   const handleSaveMaintenanceSubmit = async (nextEnabledOverride?: boolean) => {
+    if (!requireStrictAdminAuth('changing maintenance mode')) return;
     if (!onSaveMaintenanceConfig || savingMaintenance) return;
     const enabledValue =
       typeof nextEnabledOverride === 'boolean' ? nextEnabledOverride : maintEnabledDraft;
@@ -709,6 +833,9 @@ export function AdminPanelView({
 
   // Check Channels & Get Code channel management draft state
   const [channelsEnabledDraft, setChannelsEnabledDraft] = useState<boolean>(channelsConfig.enabled);
+  const [channelsMustJoinDraft, setChannelsMustJoinDraft] = useState<boolean>(
+    Boolean(channelsConfig.mustJoin),
+  );
   const [channelsDraft, setChannelsDraft] = useState<RequiredTelegramChannel[]>(
     channelsConfig.channels,
   );
@@ -726,10 +853,16 @@ export function AdminPanelView({
     text: string;
   } | null>(null);
   const [testingChannels, setTestingChannels] = useState(false);
+  const [syncingChannels, setSyncingChannels] = useState(false);
+  const [channelSyncSummary, setChannelSyncSummary] = useState<{
+    ok: boolean;
+    text: string;
+  } | null>(null);
   const [channelDiagnostic, setChannelDiagnostic] = useState<ChannelDiagnosticResult | null>(null);
 
   useEffect(() => {
     setChannelsEnabledDraft(channelsConfig.enabled);
+    setChannelsMustJoinDraft(Boolean(channelsConfig.mustJoin));
     setChannelsDraft(channelsConfig.channels);
     setGetCodeChannelDraft(channelsConfig.getCodeChannelUrl ?? DEFAULT_GET_CODE_CHANNEL_URL);
   }, [channelsConfig]);
@@ -741,6 +874,8 @@ export function AdminPanelView({
   const [taskSlots, setTaskSlots] = useState('200');
   const [taskIcon, setTaskIcon] = useState('send');
   const [taskUrl, setTaskUrl] = useState('');
+  const [taskRequireChannelCheck, setTaskRequireChannelCheck] = useState(false);
+  const [taskCheckManuallyToggled, setTaskCheckManuallyToggled] = useState(false);
   const [savingTask, setSavingTask] = useState(false);
 
   // Broadcast state
@@ -763,7 +898,7 @@ export function AdminPanelView({
   const [syncingBotUsers, setSyncingBotUsers] = useState(false);
 
   useEffect(() => {
-    if (!adminUnlocked || tab !== 'broadcast' || !onFetchBroadcastStats) return;
+    if (!isStrictAdminAuthenticated || tab !== 'broadcast' || !onFetchBroadcastStats) return;
     let cancelled = false;
     setLoadingBcastStats(true);
     void onFetchBroadcastStats(bcastExcludeBanned)
@@ -778,10 +913,10 @@ export function AdminPanelView({
     return () => {
       cancelled = true;
     };
-  }, [adminUnlocked, bcastExcludeBanned, onFetchBroadcastStats, tab]);
+  }, [bcastExcludeBanned, isStrictAdminAuthenticated, onFetchBroadcastStats, tab]);
 
   useEffect(() => {
-    if (!adminUnlocked || tab !== 'diagnostics' || !onFetchSystemDiagnostics) return;
+    if (!isStrictAdminAuthenticated || tab !== 'diagnostics' || !onFetchSystemDiagnostics) return;
     void onFetchSystemDiagnostics(false);
     if (!diagnosticsAutoRefresh) return;
     const timer = window.setInterval(() => {
@@ -790,7 +925,7 @@ export function AdminPanelView({
     return () => {
       window.clearInterval(timer);
     };
-  }, [adminUnlocked, diagnosticsAutoRefresh, onFetchSystemDiagnostics, tab]);
+  }, [diagnosticsAutoRefresh, isStrictAdminAuthenticated, onFetchSystemDiagnostics, tab]);
 
   // Guided 3-step Gift Code Generator state
   const [giftStep, setGiftStep] = useState<1 | 2 | 3>(1);
@@ -951,9 +1086,13 @@ export function AdminPanelView({
     }
   };
 
+  const adminChannelCheckUrlInvalid =
+    taskRequireChannelCheck && !isVerifiableTelegramChannelUrl(taskUrl);
+
   const handleCreateTaskSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (taskTitle.trim().length < 2) return;
+    if (!requireStrictAdminAuth('creating tasks')) return;
+    if (taskTitle.trim().length < 2 || adminChannelCheckUrlInvalid) return;
     setSavingTask(true);
     try {
       await onCreateTask({
@@ -963,9 +1102,12 @@ export function AdminPanelView({
         icon: taskIcon,
         actionUrl: taskUrl.trim(),
         totalSlots: Math.max(0, Number(taskSlots) || 0),
+        requireChannelCheck: taskRequireChannelCheck,
       });
       setTaskTitle('');
       setTaskUrl('');
+      setTaskRequireChannelCheck(false);
+      setTaskCheckManuallyToggled(false);
     } finally {
       setSavingTask(false);
     }
@@ -973,6 +1115,7 @@ export function AdminPanelView({
 
   const handleSaveAdsSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('updating ad settings')) return;
     setSavingAds(true);
     setAdsSaveFeedback(null);
     try {
@@ -1026,6 +1169,7 @@ export function AdminPanelView({
 
   const handleGenerateGiftSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('creating promo codes')) return;
     setPromoFormError(null);
     const cleanCode = giftCodeInput.trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
     if (cleanCode.length < 3) {
@@ -1129,6 +1273,7 @@ export function AdminPanelView({
   };
 
   const handleSaveChannelsSubmit = async () => {
+    if (!requireStrictAdminAuth('saving channel settings')) return;
     setSavingChannels(true);
     setChannelsSaveFeedback(null);
     try {
@@ -1137,6 +1282,7 @@ export function AdminPanelView({
       setGetCodeChannelDraft(resolvedGetCode);
       const ok = await onSaveChannelsConfig({
         enabled: channelsEnabledDraft,
+        mustJoin: channelsMustJoinDraft,
         channels: channelsDraft,
         getCodeChannelUrl: resolvedGetCode,
       });
@@ -1172,10 +1318,60 @@ export function AdminPanelView({
     }
   };
 
+  const handleSyncChannelsWithBotClick = async () => {
+    if (!requireStrictAdminAuth('syncing channel settings')) return;
+    if (!onSyncChannels || syncingChannels) return;
+    setSyncingChannels(true);
+    setChannelSyncSummary(null);
+    try {
+      onTabTap?.();
+      const resolvedGetCode =
+        normalizeGetCodeChannelUrl(getCodeChannelDraft) || getCodeChannelDraft.trim();
+      const res = await onSyncChannels({
+        enabled: channelsEnabledDraft,
+        mustJoin: channelsMustJoinDraft,
+        channels: channelsDraft,
+        getCodeChannelUrl: resolvedGetCode,
+      });
+      if (res.ok && res.channelsConfig) {
+        setChannelsEnabledDraft(res.channelsConfig.enabled);
+        setChannelsMustJoinDraft(Boolean(res.channelsConfig.mustJoin));
+        setChannelsDraft(res.channelsConfig.channels);
+        if (res.channelsConfig.getCodeChannelUrl) {
+          setGetCodeChannelDraft(res.channelsConfig.getCodeChannelUrl);
+        }
+        const results = res.results ?? [];
+        const adminCount = results.filter((r) => r.botIsAdmin).length;
+        const issueNotes = results
+          .filter((r) => !r.botIsAdmin || r.error)
+          .map((r) => `${r.handle}: ${r.error || r.botStatus}`)
+          .slice(0, 2)
+          .join(' · ');
+        setChannelSyncSummary({
+          ok: results.length === 0 || adminCount === results.length,
+          text:
+            results.length === 0
+              ? `Bot @${res.botUsername || 'connected'} synced. Add a channel below.`
+              : `Synced ${results.length} channel${results.length === 1 ? '' : 's'} with @${res.botUsername || 'bot'} (${adminCount}/${results.length} Bot Admin)${issueNotes ? ` — ${issueNotes}` : ''}`,
+        });
+        if (onRefreshChannelLogs) {
+          void onRefreshChannelLogs();
+        }
+      } else {
+        setChannelSyncSummary({
+          ok: false,
+          text: res.error || 'Could not sync channels with Telegram Bot.',
+        });
+      }
+    } finally {
+      setSyncingChannels(false);
+    }
+  };
+
   useEffect(() => {
-    if (!adminUnlocked || tab !== 'channels' || !onRefreshChannelLogs) return;
+    if (!isStrictAdminAuthenticated || tab !== 'channels' || !onRefreshChannelLogs) return;
     void onRefreshChannelLogs();
-  }, [adminUnlocked, onRefreshChannelLogs, tab]);
+  }, [isStrictAdminAuthenticated, onRefreshChannelLogs, tab]);
 
   const mergedPlayersDirectory = useMemo(() => {
     const byUid = new Map<string, UserFarmProfile>();
@@ -1294,6 +1490,7 @@ export function AdminPanelView({
   };
 
   const handleAdjustCoinsClick = async (direction: 1 | -1) => {
+    if (!requireStrictAdminAuth('adjusting user coins')) return;
     if (!selectedPlayer) return;
     const raw = Math.trunc(Number(coinAmountInput));
     if (!Number.isFinite(raw) || raw <= 0) {
@@ -1330,6 +1527,7 @@ export function AdminPanelView({
   };
 
   const handleAdjustReferCountClick = async (direction: 1 | -1) => {
+    if (!requireStrictAdminAuth('adjusting referral counts')) return;
     if (!selectedPlayer) return;
     const raw = Math.trunc(Number(referCountInput));
     if (!Number.isFinite(raw) || raw <= 0) {
@@ -1368,6 +1566,7 @@ export function AdminPanelView({
     targetAds?: number;
     busyKey: string;
   }) => {
+    if (!requireStrictAdminAuth('modifying withdraw ad progress')) return;
     if (!selectedPlayer || !onAdjustWithdrawAds) return;
     const currentAds = selectedPlayer.withdrawAdsWatched ?? 0;
     const check =
@@ -1409,6 +1608,7 @@ export function AdminPanelView({
 
   const handleSaveBotTokenSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
+    if (!requireStrictAdminAuth('updating Telegram bot credentials')) return;
     if (!onSaveBotToken) return;
     const trimmed = botTokenDraft.trim();
     if (!trimmed) {
@@ -1448,6 +1648,7 @@ export function AdminPanelView({
   };
 
   const handleClearBotTokenClick = async () => {
+    if (!requireStrictAdminAuth('clearing Telegram bot credentials')) return;
     if (!onClearBotToken) return;
     setSavingBotToken(true);
     setBotTokenFeedback(null);
@@ -1496,6 +1697,7 @@ export function AdminPanelView({
 
   const handleLinkFriendUnderSelected = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('modifying referral links')) return;
     if (!selectedPlayer || !linkFriendIdInput.trim()) return;
     setUserActionBusy('link_friend');
     setUserActionFeedback(null);
@@ -1530,6 +1732,7 @@ export function AdminPanelView({
   };
 
   const handleRemoveReferralRow = async (referrerUid: string, referredUid: string) => {
+    if (!requireStrictAdminAuth('removing referral links')) return;
     setUserActionBusy(`rm_ref_${referredUid}`);
     setUserActionFeedback(null);
     try {
@@ -1559,6 +1762,7 @@ export function AdminPanelView({
 
   const handleQuickReferSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('linking referrals')) return;
     if (!quickReferrerInput.trim() || !quickReferredInput.trim()) return;
     setQuickReferBusy(true);
     setQuickReferFeedback(null);
@@ -1599,6 +1803,7 @@ export function AdminPanelView({
 
   const handleAddAdminSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('granting admin roles')) return;
     setAdminFormFeedback(null);
     const check = canAddAdminPlayerId(adminIdInput, adminsConfig);
     if (!check.ok) {
@@ -1629,6 +1834,7 @@ export function AdminPanelView({
   };
 
   const handleToggleAdminForPlayer = async (player: UserFarmProfile) => {
+    if (!requireStrictAdminAuth('updating admin roles')) return;
     if (isAdminPlayerId(player.uid)) return;
     const isCoAdmin = isAdminPlayerId(player.uid, extraAdminIds);
     setUserActionBusy('toggle_admin');
@@ -1663,6 +1869,7 @@ export function AdminPanelView({
   };
 
   const handleRemoveAdminRow = async (targetId: string) => {
+    if (!requireStrictAdminAuth('removing admin roles')) return;
     setAdminFormFeedback(null);
     setRemovingAdminId(targetId);
     try {
@@ -1684,6 +1891,7 @@ export function AdminPanelView({
 
   const handleManualBanSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (!requireStrictAdminAuth('banning players')) return;
     setBanFormError(null);
     const check = canBanPlayerId(banTargetIdInput, extraAdminIds);
     if (!check.ok) {
@@ -1715,6 +1923,7 @@ export function AdminPanelView({
   };
 
   const handleBanPlayerRow = async (player: UserFarmProfile) => {
+    if (!requireStrictAdminAuth('banning players')) return;
     setBanFormError(null);
     const check = canBanPlayerId(player.uid, extraAdminIds);
     if (!check.ok) {
@@ -1736,6 +1945,7 @@ export function AdminPanelView({
   };
 
   const handleUnbanRow = async (targetId: string) => {
+    if (!requireStrictAdminAuth('unbanning players')) return;
     setBanFormError(null);
     setBanningId(targetId);
     try {
@@ -1746,17 +1956,27 @@ export function AdminPanelView({
     }
   };
 
+  const isPasscodeSetupRequired =
+    adminNeedsPasscodeSetup || adminPasscodeSource === 'unconfigured';
+
   const handleUnlockSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const clean = passcodeInput.trim();
     if (!clean) {
-      setPasscodeError('Please enter your Admin Passcode.');
+      setPasscodeError(
+        isPasscodeSetupRequired
+          ? 'Create an initial Admin Passcode (6+ characters).'
+          : 'Please enter your Admin Passcode.',
+      );
       return;
     }
     setPasscodeError(null);
     setVerifyingPasscode(true);
     try {
-      const result = await onVerifyAdminPasscode(clean);
+      const result =
+        isPasscodeSetupRequired && onSetupInitialAdminPasscode
+          ? await onSetupInitialAdminPasscode(clean)
+          : await onVerifyAdminPasscode(clean);
       if (result.ok) {
         setPasscodeInput('');
       } else {
@@ -1833,7 +2053,7 @@ export function AdminPanelView({
     );
   }
 
-  if (!adminUnlocked) {
+  if (!isStrictAdminAuthenticated) {
     const detectedDisplayId = isAdminPlayerId(playerId)
       ? PRIMARY_ADMIN_TELEGRAM_ID
       : extractTelegramNumericUserId(playerId) || playerId;
@@ -1884,32 +2104,32 @@ export function AdminPanelView({
               <span className="font-bold text-stone-500 dark:text-stone-400">Passcode Verification</span>
               <span className="font-extrabold text-stone-800 dark:text-stone-200">
                 {adminPasscodeSource === 'database'
-                  ? 'Live Database (Firestore)'
+                  ? 'Live Database Vault'
                   : adminPasscodeSource === 'server_file'
                     ? 'Server Security Vault'
-                    : adminPasscodeSource === 'env'
-                      ? 'Environment Passcode'
-                      : 'Default Server Passcode'}
+                    : adminPasscodeSource === 'unconfigured'
+                      ? 'First-Run Setup'
+                      : 'Environment Passcode'}
               </span>
             </div>
 
             <div className="space-y-1.5">
               <label htmlFor="admin-passcode-input" className="text-xs font-extrabold text-stone-700 dark:text-stone-300">
-                Admin Passcode
+                {isPasscodeSetupRequired ? 'Create Initial Admin Passcode (6+ chars)' : 'Admin Passcode'}
               </label>
               <div className="relative">
                 <input
                   id="admin-passcode-input"
                   type={showPasscodeInput ? 'text' : 'password'}
-                  inputMode="numeric"
-                  autoComplete="current-password"
+                  inputMode={isPasscodeSetupRequired ? 'text' : 'numeric'}
+                  autoComplete={isPasscodeSetupRequired ? 'new-password' : 'current-password'}
                   autoFocus
                   value={passcodeInput}
                   onChange={(e) => {
                     setPasscodeInput(e.target.value);
                     setPasscodeError(null);
                   }}
-                  placeholder="Enter admin passcode..."
+                  placeholder={isPasscodeSetupRequired ? 'Create 6+ character passcode...' : 'Enter admin passcode...'}
                   className="clay-inset w-full min-h-[46px] pl-3.5 pr-11 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 placeholder:text-stone-400 focus:outline-none focus:ring-2 focus:ring-emerald-400"
                 />
                 <button
@@ -1949,7 +2169,13 @@ export function AdminPanelView({
                 className="clay-btn clay-btn-emerald flex-1 min-h-[46px] rounded-2xl font-extrabold text-sm flex items-center justify-center gap-2 disabled:opacity-55"
               >
                 <KeyRound className="w-4 h-4" />
-                <span>{verifyingPasscode ? 'Verifying...' : 'Open Admin Panel'}</span>
+                <span>
+                  {verifyingPasscode
+                    ? 'Verifying...'
+                    : isPasscodeSetupRequired
+                      ? 'Save & Open Admin Panel'
+                      : 'Open Admin Panel'}
+                </span>
               </button>
             </div>
           </div>
@@ -2140,6 +2366,169 @@ export function AdminPanelView({
     );
   };
 
+  const renderEconomySettingsCard = () => {
+    if (!onSaveEconomyConfig) return null;
+    return (
+      <form onSubmit={(e) => void handleSaveEconomySubmit(e)} className="clay-card p-4 space-y-3">
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div>
+            <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
+              <Coins className="w-4 h-4 text-amber-500" />
+              <span>Min. Withdraw &amp; Per-Refer Reward</span>
+            </h2>
+            <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
+              Live values applied immediately to Withdrawals and Referral rewards across the app.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={() => {
+              onTabTap?.();
+              setMinWithdrawEggsDraft(String(DEFAULT_ECONOMY_CONFIG.minWithdrawEggs));
+              setPerReferRewardDraft(String(DEFAULT_ECONOMY_CONFIG.perReferRewardCoins));
+              setEconomyFeedback(null);
+            }}
+            className="clay-btn clay-btn-neutral px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold shrink-0"
+          >
+            Defaults (100 / 150)
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="clay-inset !rounded-2xl p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="admin-min-withdraw-eggs"
+                className="text-xs font-extrabold text-stone-800 dark:text-stone-200"
+              >
+                Min. Withdraw (Eggs)
+              </label>
+              <span className="text-[10px] font-mono-num font-bold text-stone-500 dark:text-stone-400">
+                1 – 1,000,000
+              </span>
+            </div>
+            <input
+              id="admin-min-withdraw-eggs"
+              type="number"
+              min={1}
+              max={1000000}
+              step={1}
+              required
+              value={minWithdrawEggsDraft}
+              onChange={(e) => {
+                setMinWithdrawEggsDraft(e.target.value);
+                setEconomyFeedback(null);
+              }}
+              className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-sky-400"
+            />
+            <div className="flex items-center gap-1 flex-wrap">
+              {[50, 100, 250, 500, 1000].map((preset) => (
+                <button
+                  key={`minwd_${preset}`}
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    setMinWithdrawEggsDraft(String(preset));
+                    setEconomyFeedback(null);
+                  }}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-mono-num font-extrabold cursor-pointer transition-colors ${
+                    minWithdrawEggsDraft === String(preset)
+                      ? 'bg-sky-500 text-white'
+                      : 'bg-stone-200/80 dark:bg-stone-800 text-stone-700 dark:text-stone-300'
+                  }`}
+                >
+                  {preset}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="clay-inset !rounded-2xl p-3 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <label
+                htmlFor="admin-per-refer-coins"
+                className="text-xs font-extrabold text-stone-800 dark:text-stone-200"
+              >
+                Per Verified Refer (Coins)
+              </label>
+              <span className="text-[10px] font-mono-num font-bold text-stone-500 dark:text-stone-400">
+                0 – 100,000
+              </span>
+            </div>
+            <p className="text-[10px] font-semibold text-stone-500 dark:text-stone-400">
+              Paid on friend&apos;s 1st hen + 5% lifetime deposit share (no friend welcome bonus or egg share).
+            </p>
+            <input
+              id="admin-per-refer-coins"
+              type="number"
+              min={0}
+              max={100000}
+              step={10}
+              required
+              value={perReferRewardDraft}
+              onChange={(e) => {
+                setPerReferRewardDraft(e.target.value);
+                setEconomyFeedback(null);
+              }}
+              className="clay-card !rounded-xl w-full min-h-[42px] px-3 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+            />
+            <div className="flex items-center gap-1 flex-wrap">
+              {[100, 150, 300, 500, 1000].map((preset) => (
+                <button
+                  key={`perref_${preset}`}
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    setPerReferRewardDraft(String(preset));
+                    setEconomyFeedback(null);
+                  }}
+                  className={`px-2 py-0.5 rounded-lg text-[10px] font-mono-num font-extrabold cursor-pointer transition-colors ${
+                    perReferRewardDraft === String(preset)
+                      ? 'bg-emerald-500 text-white'
+                      : 'bg-stone-200/80 dark:bg-stone-800 text-stone-700 dark:text-stone-300'
+                  }`}
+                >
+                  +{preset}c
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+
+        {economyFeedback && (
+          <div
+            role="status"
+            className={`rounded-xl border px-3 py-2 text-xs font-bold ${
+              economyFeedback.ok
+                ? 'bg-emerald-50 dark:bg-emerald-950/40 border-emerald-200 dark:border-emerald-800/60 text-emerald-800 dark:text-emerald-300'
+                : 'bg-rose-50 dark:bg-rose-950/40 border-rose-200 dark:border-rose-800/60 text-rose-700 dark:text-rose-300'
+            }`}
+          >
+            {economyFeedback.text}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          disabled={savingEconomy}
+          className="clay-btn clay-btn-amber w-full min-h-[42px] rounded-xl text-xs font-extrabold inline-flex items-center justify-center gap-1.5 disabled:opacity-50"
+        >
+          {savingEconomy ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+              <span>Saving Economy Settings...</span>
+            </>
+          ) : (
+            <>
+              <Check className="w-3.5 h-3.5" />
+              <span>Save Min. Withdraw &amp; Refer Reward</span>
+            </>
+          )}
+        </button>
+      </form>
+    );
+  };
+
   return (
     <div className="animate-clay-enter space-y-4 pb-24">
       {/* Executive Header */}
@@ -2162,7 +2551,7 @@ export function AdminPanelView({
               <span className="inline-flex items-center gap-1 rounded-lg bg-emerald-500/20 border border-emerald-400/30 px-2 py-0.5 text-[10px] font-extrabold text-emerald-200 shrink-0">
                 <ShieldCheck className="w-3 h-3" />
                 <span>
-                  ID {isAdminPlayerId(playerId) ? PRIMARY_ADMIN_TELEGRAM_ID : extractTelegramNumericUserId(playerId) || playerId}
+                  ID {isAdminPlayerId(playerId) ? PRIMARY_ADMIN_TELEGRAM_ID : extractTelegramNumericUserId(playerId) || playerId} · Verified
                 </span>
               </span>
             </div>
@@ -3718,37 +4107,119 @@ export function AdminPanelView({
               </button>
             </div>
 
+            {/* Must Join Strict Requirement Toggle */}
+            <div className="clay-inset !rounded-2xl p-3 flex items-start justify-between gap-3 border border-amber-300/60 dark:border-amber-700/50">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                    &lsquo;Must Join&rsquo; Requirement
+                  </span>
+                  <span
+                    className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                      channelsMustJoinDraft && channelsEnabledDraft
+                        ? 'bg-amber-50 dark:bg-amber-950/60 border-amber-300 dark:border-amber-700/80 text-amber-800 dark:text-amber-300'
+                        : 'bg-stone-100 dark:bg-stone-800 border-stone-200 dark:border-stone-700 text-stone-500 dark:text-stone-400'
+                    }`}
+                  >
+                    {channelsMustJoinDraft
+                      ? channelsEnabledDraft
+                        ? 'STRICT LOCK ON'
+                        : 'PAUSED (GATE OFF)'
+                      : 'OFF'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-stone-600 dark:text-stone-300 mt-0.5 leading-snug">
+                  When enabled, players must join all active required channels before performing any game actions (collecting eggs, buying hens, upgrading, claiming tasks/ads, or withdrawing).
+                </p>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={channelsMustJoinDraft}
+                aria-label="Toggle Must Join requirement"
+                onClick={() => {
+                  onTabTap?.();
+                  setChannelsMustJoinDraft((prev) => {
+                    const next = !prev;
+                    if (next && !channelsEnabledDraft) {
+                      setChannelsEnabledDraft(true);
+                    }
+                    return next;
+                  });
+                }}
+                className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                  channelsMustJoinDraft ? 'bg-amber-500' : 'bg-stone-300 dark:bg-stone-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    channelsMustJoinDraft ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+
             <div className="clay-card-warm !rounded-2xl px-3.5 py-2.5 space-y-2 text-xs font-semibold text-amber-900 dark:text-amber-200">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span>
                   Server Bot Status:{' '}
                   <span className="font-extrabold">
                     {serverBotConfigured === true
-                      ? 'TELEGRAM_BOT_TOKEN Connected'
+                      ? 'Bot Token Connected'
                       : serverBotConfigured === false
-                        ? 'TELEGRAM_BOT_TOKEN Missing on Server'
+                        ? 'Bot Token Missing on Server'
                         : 'Checking...'}
                   </span>
                 </span>
-                {onTestChannels && (
-                  <button
-                    type="button"
-                    disabled={testingChannels}
-                    onClick={() => void handleTestChannelsClick()}
-                    className="clay-btn clay-btn-sky min-h-[32px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
-                  >
-                    {testingChannels ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5" />
-                    )}
-                    <span>{testingChannels ? 'Testing...' : 'Test Bot & Channels'}</span>
-                  </button>
-                )}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  {onSyncChannels && (
+                    <button
+                      type="button"
+                      disabled={syncingChannels}
+                      onClick={() => void handleSyncChannelsWithBotClick()}
+                      className="clay-btn clay-btn-emerald min-h-[32px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {syncingChannels ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      <span>{syncingChannels ? 'Syncing...' : 'Live Sync with Bot'}</span>
+                    </button>
+                  )}
+                  {onTestChannels && (
+                    <button
+                      type="button"
+                      disabled={testingChannels}
+                      onClick={() => void handleTestChannelsClick()}
+                      className="clay-btn clay-btn-sky min-h-[32px] px-3 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1.5 disabled:opacity-50"
+                    >
+                      {testingChannels ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      )}
+                      <span>{testingChannels ? 'Testing...' : 'Test Bot & Channels'}</span>
+                    </button>
+                  )}
+                </div>
               </div>
               <p className="text-[11px] opacity-90">
-                Make sure <span className="font-mono-num">TELEGRAM_BOT_TOKEN</span> is set in server environment variables AND your bot is added as an <span className="font-extrabold">Admin</span> in every active channel below. For private channels, enter the <span className="font-mono-num">-100...</span> Channel ID and paste the <span className="font-mono-num">t.me/+...</span> invite link in Optional Join URL.
+                Save your Bot Token above, make the bot an <span className="font-extrabold">Admin</span> in each channel, then tap <span className="font-extrabold">Live Sync with Bot</span> to fetch live Channel IDs (<span className="font-mono-num">-100...</span>), titles, invite URLs &amp; member counts automatically.
               </p>
+
+              {channelSyncSummary && (
+                <div
+                  role="status"
+                  className={`rounded-xl border px-3 py-2 text-[11px] font-bold ${
+                    channelSyncSummary.ok
+                      ? 'bg-emerald-50 dark:bg-emerald-950/50 border-emerald-200 dark:border-emerald-800/70 text-emerald-800 dark:text-emerald-300'
+                      : 'bg-rose-50 dark:bg-rose-950/50 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                  }`}
+                >
+                  {channelSyncSummary.text}
+                </div>
+              )}
 
               {channelDiagnostic && (
                 <div className="clay-inset !rounded-xl p-2.5 space-y-1.5 text-[11px]">
@@ -4021,6 +4492,27 @@ export function AdminPanelView({
                           >
                             {isActive ? 'Active' : 'Paused'}
                           </span>
+                          {ch.chatId && (
+                            <span className="rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 px-1.5 py-0.5 text-[10px] font-mono-num font-bold text-sky-700 dark:text-sky-300">
+                              ID {ch.chatId}
+                            </span>
+                          )}
+                          {typeof ch.memberCount === 'number' && ch.memberCount >= 0 && (
+                            <span className="rounded-md bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800/70 px-1.5 py-0.5 text-[10px] font-mono-num font-bold text-amber-800 dark:text-amber-300">
+                              {ch.memberCount.toLocaleString()} members
+                            </span>
+                          )}
+                          {typeof ch.botIsAdmin === 'boolean' && (
+                            <span
+                              className={`rounded-md border px-1.5 py-0.5 text-[10px] font-extrabold ${
+                                ch.botIsAdmin
+                                  ? 'bg-emerald-50 dark:bg-emerald-950/60 border-emerald-200 dark:border-emerald-800/70 text-emerald-700 dark:text-emerald-300'
+                                  : 'bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-rose-700 dark:text-rose-300'
+                              }`}
+                            >
+                              {ch.botIsAdmin ? 'Bot Admin' : `Bot: ${ch.botStatus || 'Not Admin'}`}
+                            </span>
+                          )}
                         </div>
                         <div className="text-xs font-bold text-stone-700 dark:text-stone-200 truncate mt-0.5">
                           {ch.title}
@@ -4031,9 +4523,9 @@ export function AdminPanelView({
                       </div>
 
                       <div className="flex items-center gap-1.5 shrink-0">
-                        {ch.url && (
+                        {sanitizeExternalUrl(ch.url) && (
                           <a
-                            href={ch.url}
+                            href={sanitizeExternalUrl(ch.url)!}
                             target="_blank"
                             rel="noopener noreferrer"
                             aria-label={`Open ${ch.handle}`}
@@ -4081,9 +4573,9 @@ export function AdminPanelView({
                     Where the clickable &ldquo;Get code&rdquo; button in Tasks sends players to find gift codes.
                   </p>
                 </div>
-                {normalizeGetCodeChannelUrl(getCodeChannelDraft) && (
+                {sanitizeExternalUrl(normalizeGetCodeChannelUrl(getCodeChannelDraft)) && (
                   <a
-                    href={normalizeGetCodeChannelUrl(getCodeChannelDraft)}
+                    href={sanitizeExternalUrl(normalizeGetCodeChannelUrl(getCodeChannelDraft))!}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="clay-btn clay-btn-sky min-h-[32px] px-2.5 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0"
@@ -4182,6 +4674,7 @@ export function AdminPanelView({
 
         return (
         <div key="admin-tab-withdrawals" className="animate-clay-enter space-y-3">
+          {renderEconomySettingsCard()}
           {/* Collapsible User Approval DM Template Editor */}
           <div className="clay-card !rounded-2xl overflow-hidden">
             <button
@@ -4239,6 +4732,7 @@ export function AdminPanelView({
                   />
                   <div className="flex flex-wrap gap-1.5 pt-0.5">
                     {[
+                      '{txId}',
                       '{gramAmount}',
                       '{eggsAmount}',
                       '{walletShort}',
@@ -4338,6 +4832,7 @@ export function AdminPanelView({
                     type="button"
                     disabled={savingWdTemplate || !wdMsgDraft.trim() || !onSaveWithdrawApproveTemplate}
                     onClick={async () => {
+                      if (!requireStrictAdminAuth('updating payout approval templates')) return;
                       if (!onSaveWithdrawApproveTemplate) return;
                       setSavingWdTemplate(true);
                       setWdTemplateFeedback(null);
@@ -4586,6 +5081,7 @@ export function AdminPanelView({
                             type="button"
                             disabled={isBusy}
                             onClick={async () => {
+                              if (!requireStrictAdminAuth('approving payouts')) return;
                               setBusyId(req.id);
                               try {
                                 await onReviewWithdrawal(req, 'approved', noteById[req.id] || '');
@@ -4602,6 +5098,7 @@ export function AdminPanelView({
                             type="button"
                             disabled={isBusy}
                             onClick={async () => {
+                              if (!requireStrictAdminAuth('rejecting payouts')) return;
                               setBusyId(req.id);
                               try {
                                 await onReviewWithdrawal(req, 'rejected', noteById[req.id] || '');
@@ -5386,7 +5883,10 @@ export function AdminPanelView({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void onTogglePromoCode(p.code, !p.isActive)}
+                            onClick={() => {
+                              if (!requireStrictAdminAuth('updating promo codes')) return;
+                              void onTogglePromoCode(p.code, !p.isActive);
+                            }}
                             aria-label={p.isActive ? 'Pause promo code' : 'Resume promo code'}
                             className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center"
                           >
@@ -5398,7 +5898,10 @@ export function AdminPanelView({
                           </button>
                           <button
                             type="button"
-                            onClick={() => void onDeletePromoCode(p.code)}
+                            onClick={() => {
+                              if (!requireStrictAdminAuth('deleting promo codes')) return;
+                              void onDeletePromoCode(p.code);
+                            }}
                             aria-label="Delete promo code"
                             className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-950/80 text-rose-600 dark:text-rose-400 flex items-center justify-center cursor-pointer transition-colors"
                           >
@@ -5456,6 +5959,7 @@ export function AdminPanelView({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                if (!requireStrictAdminAuth('updating task pricing')) return;
                 if (savingTaskPricing) return;
                 onTabTap?.();
                 setSavingTaskPricing(true);
@@ -5746,15 +6250,57 @@ export function AdminPanelView({
                 id="admin-task-url"
                 type="url"
                 value={taskUrl}
-                onChange={(e) => setTaskUrl(e.target.value)}
+                onChange={(e) => {
+                  const nextUrl = e.target.value;
+                  setTaskUrl(nextUrl);
+                  if (!taskCheckManuallyToggled) {
+                    setTaskRequireChannelCheck(isVerifiableTelegramChannelUrl(nextUrl));
+                  }
+                }}
                 placeholder="https://t.me/..."
                 className="clay-inset w-full min-h-[42px] px-3 text-sm text-stone-900 dark:text-stone-100 placeholder:text-stone-400 dark:placeholder:text-stone-500 focus:outline-none focus:ring-2 focus:ring-amber-400"
               />
             </div>
 
+            <label
+              htmlFor="admin-task-channel-check"
+              className={`clay-inset !rounded-2xl p-3 flex items-start gap-3 cursor-pointer border transition-colors ${
+                taskRequireChannelCheck
+                  ? 'border-sky-400 bg-sky-50/70 dark:bg-sky-950/40'
+                  : 'border-transparent'
+              }`}
+            >
+              <input
+                id="admin-task-channel-check"
+                type="checkbox"
+                checked={taskRequireChannelCheck}
+                onChange={(e) => {
+                  onTabTap?.();
+                  setTaskCheckManuallyToggled(true);
+                  setTaskRequireChannelCheck(e.target.checked);
+                }}
+                className="mt-0.5 w-4 h-4 accent-sky-600 rounded cursor-pointer shrink-0"
+              />
+              <div className="min-w-0 flex-1 space-y-0.5">
+                <div className="flex items-center gap-1.5 text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                  <ShieldCheck className="w-3.5 h-3.5 text-sky-600 dark:text-sky-400" />
+                  <span>Require Channel Join Check (Live Bot Verification)</span>
+                </div>
+                <p className="text-[11px] leading-snug text-stone-500 dark:text-stone-400">
+                  Blocks Claim until your Bot confirms the user joined this Telegram channel. Make your Bot an Admin in the channel.
+                </p>
+              </div>
+            </label>
+
+            {adminChannelCheckUrlInvalid && (
+              <div className="rounded-xl bg-sky-50 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-xs font-bold text-sky-800 dark:text-sky-300">
+                Enter a valid Telegram channel URL (e.g. https://t.me/YourChannel) or uncheck Channel Join Check.
+              </div>
+            )}
+
             <button
               type="submit"
-              disabled={savingTask || taskTitle.trim().length < 2}
+              disabled={savingTask || taskTitle.trim().length < 2 || adminChannelCheckUrlInvalid}
               className="clay-btn clay-btn-emerald w-full min-h-[44px] rounded-2xl disabled:opacity-50 font-extrabold text-sm"
             >
               {savingTask ? 'Publishing Task...' : 'Publish Task'}
@@ -5779,6 +6325,7 @@ export function AdminPanelView({
               <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
                 {customTasks.map((task) => {
                   const active = task.isActive !== false;
+                  const isVerifiedCheck = getTaskChannelCheckMode(task) !== 'none';
                   return (
                     <div key={task.id} className="p-3.5 flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
@@ -5790,6 +6337,11 @@ export function AdminPanelView({
                             <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100 truncate">
                               {task.title}
                             </span>
+                            {isVerifiedCheck && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-sky-50 dark:bg-sky-950/60 border border-sky-200 dark:border-sky-800/70 text-[10px] font-bold text-sky-700 dark:text-sky-300 shrink-0">
+                                Verified
+                              </span>
+                            )}
                             {!active && (
                               <span className="px-1.5 py-0.5 rounded-md bg-amber-50 dark:bg-amber-950/60 border border-amber-200 dark:border-amber-800/70 text-[10px] font-bold text-amber-700 dark:text-amber-300 shrink-0">
                                 Paused
@@ -5808,7 +6360,10 @@ export function AdminPanelView({
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
-                          onClick={() => void onToggleTask(task.id, !active)}
+                          onClick={() => {
+                            if (!requireStrictAdminAuth('updating tasks')) return;
+                            void onToggleTask(task.id, !active);
+                          }}
                           aria-label={active ? 'Pause task' : 'Resume task'}
                           className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center"
                         >
@@ -5820,7 +6375,10 @@ export function AdminPanelView({
                         </button>
                         <button
                           type="button"
-                          onClick={() => void onDeleteTask(task.id)}
+                          onClick={() => {
+                            if (!requireStrictAdminAuth('deleting tasks')) return;
+                            void onDeleteTask(task.id);
+                          }}
                           aria-label="Delete task"
                           className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-950/80 text-rose-600 dark:text-rose-400 flex items-center justify-center cursor-pointer transition-colors"
                         >
@@ -6534,6 +7092,7 @@ export function AdminPanelView({
         };
 
         const triggerBroadcast = async (testOnlyToAdmin: boolean) => {
+          if (!requireStrictAdminAuth('sending a broadcast')) return;
           if (!onSendBroadcast || sendingBroadcast) return;
           setSendingBroadcast(testOnlyToAdmin ? 'test' : 'all');
           setBroadcastResult(null);
@@ -7361,6 +7920,7 @@ export function AdminPanelView({
          ======================================================================== */}
       {tab === 'maintenance' && (
         <div key="admin-tab-maintenance" className="animate-clay-enter space-y-4">
+          {renderEconomySettingsCard()}
           <div className="clay-card p-4 space-y-4">
             <div className="flex items-start justify-between gap-3">
               <div>
@@ -7597,18 +8157,40 @@ export function AdminPanelView({
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
+                if (!requireStrictAdminAuth('executing System Data Reset')) return;
                 if (!onExecuteDataReset || resettingData) return;
                 if (resetConfirmInput.trim().toUpperCase() !== 'RESET') return;
+                const cleanResetPasscode = resetPasscodeInput.trim();
+                if (!cleanResetPasscode) {
+                  setResetFeedback({
+                    ok: false,
+                    text: 'Re-enter your Admin Passcode to authorize System Data Reset.',
+                  });
+                  return;
+                }
                 onTabTap?.();
                 setResettingData(true);
-                setResetProgressText('Starting system data reset...');
+                setResetProgressText('Verifying Admin Passcode...');
                 setResetFeedback(null);
                 try {
+                  const authCheck = await onVerifyAdminPasscode(cleanResetPasscode);
+                  if (!authCheck.ok) {
+                    setResetPasscodeInput('');
+                    setResetFeedback({
+                      ok: false,
+                      text:
+                        authCheck.error ||
+                        'Admin Passcode verification failed. System Data Reset aborted.',
+                    });
+                    return;
+                  }
+                  setResetProgressText('Starting system data reset...');
                   const res = await onExecuteDataReset((stage) => {
                     setResetProgressText(stage);
                   });
                   if (res.ok) {
                     setResetConfirmInput('');
+                    setResetPasscodeInput('');
                     setResetFeedback({
                       ok: true,
                       text: res.summary || 'System data reset completed cleanly. All users now start fresh!',
@@ -7631,6 +8213,38 @@ export function AdminPanelView({
               }}
               className="space-y-3 pt-1"
             >
+              <div className="space-y-1">
+                <label
+                  htmlFor="admin-data-reset-passcode"
+                  className="text-xs font-bold text-stone-700 dark:text-stone-300 flex items-center gap-1.5"
+                >
+                  <KeyRound className="w-3.5 h-3.5 text-rose-500" />
+                  <span>Re-enter Admin Passcode to authorize full reset</span>
+                </label>
+                <div className="relative">
+                  <input
+                    id="admin-data-reset-passcode"
+                    type={showResetPasscode ? 'text' : 'password'}
+                    autoComplete="current-password"
+                    value={resetPasscodeInput}
+                    onChange={(e) => {
+                      setResetPasscodeInput(e.target.value);
+                      if (resetFeedback && !resetFeedback.ok) setResetFeedback(null);
+                    }}
+                    placeholder="Enter Admin Passcode..."
+                    className="clay-inset w-full min-h-[44px] pl-3 pr-10 text-sm font-mono-num font-extrabold text-stone-900 dark:text-stone-100 focus:outline-none focus:ring-2 focus:ring-rose-400"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowResetPasscode((v) => !v)}
+                    aria-label={showResetPasscode ? 'Hide reset passcode' : 'Show reset passcode'}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 w-8 h-8 rounded-lg flex items-center justify-center text-stone-500 hover:text-stone-800 dark:text-stone-400 dark:hover:text-stone-100"
+                  >
+                    {showResetPasscode ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                  </button>
+                </div>
+              </div>
+
               <div className="space-y-1">
                 <label
                   htmlFor="admin-data-reset-confirm"
@@ -7678,6 +8292,7 @@ export function AdminPanelView({
                 disabled={
                   !onExecuteDataReset ||
                   resettingData ||
+                  !resetPasscodeInput.trim() ||
                   resetConfirmInput.trim().toUpperCase() !== 'RESET'
                 }
                 className="clay-btn clay-btn-rose w-full min-h-[46px] rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-2 disabled:opacity-45"

@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { CalendarDays, Check, Clock, Copy, Gift, Share2, TrendingUp, Users } from 'lucide-react';
-import { motion, useReducedMotion } from 'motion/react';
+import { motion } from 'motion/react';
 import {
   Area,
   AreaChart,
@@ -15,9 +15,6 @@ import {
   buildReferralGrowthSeries,
   type DailyReferralGrowthPoint,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
-  REFERRAL_MILESTONE_CRATES,
-  REFERRED_WELCOME_BONUS_COINS,
-  REFERRER_LIFETIME_EGG_COMMISSION_RATE,
   REFERRER_SIGNUP_BONUS_COINS,
   summarizeReferrals,
 } from '../game/economy';
@@ -32,7 +29,7 @@ import {
 import { detectBrowserTelegramBotConfig } from '../utils/telegram';
 import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
 import clayEggBasket from '../assets/images/clay_egg_basket_1794678826026.jpg';
-import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
+import { ChickenSprite, CoinIcon } from './GameIcons';
 
 function ReferralGrowthTooltip({
   active,
@@ -66,20 +63,20 @@ interface FriendsViewProps {
   profile: UserFarmProfile;
   referrals: ReferralRecord[];
   transactions?: TransactionEntry[];
+  perReferRewardCoins?: number;
   botUsername?: string;
   appShortName?: string;
-  onClaimReferralMilestone?: (targetActive: number) => void;
 }
 
 export function FriendsView({
   profile,
   referrals,
   transactions = [],
+  perReferRewardCoins = REFERRER_SIGNUP_BONUS_COINS,
   botUsername,
   appShortName,
-  onClaimReferralMilestone,
 }: FriendsViewProps) {
-  const shouldReduceMotion = useReducedMotion();
+  const effectiveReferReward = Math.max(0, Math.floor(Number(perReferRewardCoins) ?? REFERRER_SIGNUP_BONUS_COINS));
   const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'copied-pitch' | 'error' | null>(null);
   const [isSharing, setIsSharing] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
@@ -152,24 +149,10 @@ export function FriendsView({
 
   const { activeCount, pendingCount, totalToppedUp } = summarizeReferrals(referrals);
   const effectiveActiveCount = Math.max(profile.referralCount, activeCount);
-  const nextUnclaimedCrate = useMemo(
-    () =>
-      REFERRAL_MILESTONE_CRATES.find(
-        (c) => !(profile.claimedReferralMilestones ?? []).includes(c.targetActive),
-      ) || null,
-    [profile.claimedReferralMilestones],
-  );
   const invitedFriends = useMemo(
     () => buildInvitedFriendsList(referrals, transactions),
     [referrals, transactions],
   );
-  const lifetimeReferralEggsEarned = useMemo(() => {
-    const txEggsTotal = transactions
-      .filter((tx) => tx.type === 'referral' && tx.currency === 'eggs' && tx.amount > 0)
-      .reduce((sum, tx) => sum + tx.amount, 0);
-    const friendsEggsTotal = invitedFriends.reduce((sum, f) => sum + f.eggsGenerated, 0);
-    return Math.max(txEggsTotal, friendsEggsTotal);
-  }, [invitedFriends, transactions]);
   const referralGrowthSeries = useMemo(
     () => buildReferralGrowthSeries(referrals),
     [referrals],
@@ -178,7 +161,6 @@ export function FriendsView({
     () => referralGrowthSeries.reduce((sum, day) => sum + day.newReferrals, 0),
     [referralGrowthSeries],
   );
-  const eggPercentLabel = `${Math.round(REFERRER_LIFETIME_EGG_COMMISSION_RATE * 100)}%`;
   const depositPercentLabel = `${Math.round(REFERRAL_DEPOSIT_COMMISSION_RATE * 100)}%`;
 
   const shareButtonLabel = isSharing
@@ -197,20 +179,9 @@ export function FriendsView({
         <div>
           <h1 className="text-2xl font-extrabold text-stone-900 dark:text-stone-100">Invite Friends</h1>
           <p className="text-sm text-stone-500 dark:text-stone-400">
-            Earn +{REFERRER_SIGNUP_BONUS_COINS} coins on friend's 1st hen, +{REFERRED_WELCOME_BONUS_COINS} bonus for friend &amp; {depositPercentLabel} lifetime deposit share
+            Earn +{effectiveReferReward.toLocaleString()} coins per verified refer &amp; {depositPercentLabel} lifetime deposit share
           </p>
         </div>
-        {nextUnclaimedCrate && (
-          <div className="clay-card-warm !rounded-2xl px-3 py-1.5 text-right shrink-0">
-            <div className="text-[10px] font-extrabold uppercase tracking-wider text-amber-800 dark:text-amber-300">
-              Next Crate ({Math.min(effectiveActiveCount, nextUnclaimedCrate.targetActive)}/{nextUnclaimedCrate.targetActive})
-            </div>
-            <div className="text-xs font-extrabold font-mono-num text-stone-900 dark:text-stone-100">
-              +{nextUnclaimedCrate.rewardCoins.toLocaleString()}c
-              {nextUnclaimedCrate.bonusLeghorns > 0 ? ` + ${nextUnclaimedCrate.bonusLeghorns} Hen` : ''}
-            </div>
-          </div>
-        )}
       </div>
 
       {/* Clay Mascot & Reward Trio Hero */}
@@ -269,42 +240,33 @@ export function FriendsView({
         <div>
           <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100">Referral rewards</h2>
           <p className="text-xs text-stone-500 dark:text-stone-400">
-            Referral links apply immediately (+{REFERRED_WELCOME_BONUS_COINS} welcome coins for your friend). You earn +{REFERRER_SIGNUP_BONUS_COINS} coins when they buy their 1st hen, plus {depositPercentLabel} coins on every deposit for life &amp; {eggPercentLabel} eggs.
+            You earn +{effectiveReferReward.toLocaleString()} coins when your friend buys their 1st hen (verified refer), plus {depositPercentLabel} coins on every deposit for life.
           </p>
         </div>
 
-        <div className="grid grid-cols-3 gap-2">
-          <div className="clay-card-mint clay-hover-lift !rounded-2xl p-2.5 text-center">
+        <div className="grid grid-cols-2 gap-2.5">
+          <div className="clay-card-mint clay-hover-lift !rounded-2xl p-3 text-center">
             <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
               <CoinIcon className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
-              <span>+{REFERRER_SIGNUP_BONUS_COINS}</span>
+              <span>+{effectiveReferReward.toLocaleString()}</span>
             </div>
             <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
-              On friend's 1st hen
+              Verified refer (1st hen)
             </div>
           </div>
-          <div className="clay-inset clay-hover-lift !rounded-2xl p-2.5 text-center">
-            <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-sky-700 dark:text-sky-400 font-mono-num">
-              <Gift className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
-              <span>+{REFERRED_WELCOME_BONUS_COINS}</span>
-            </div>
-            <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
-              Friend bonus
-            </div>
-          </div>
-          <div className="clay-card-warm clay-hover-lift !rounded-2xl p-2.5 text-center">
+          <div className="clay-card-warm clay-hover-lift !rounded-2xl p-3 text-center">
             <div className="flex items-center justify-center gap-1 text-lg sm:text-xl font-extrabold text-amber-700 dark:text-amber-400 font-mono-num">
               <CoinIcon className="w-4 h-4 sm:w-5 sm:h-5 shrink-0" />
               <span>{depositPercentLabel}</span>
             </div>
             <div className="text-[11px] font-semibold text-stone-600 dark:text-stone-300 mt-0.5 leading-tight">
-              Lifetime deposit &amp; {eggPercentLabel} eggs
+              Lifetime deposit share
             </div>
           </div>
         </div>
 
         <div className="clay-inset !rounded-2xl px-3.5 py-2.5 text-[11px] font-semibold text-stone-600 dark:text-stone-300 text-center">
-          Instant Telegram Bot &amp; in-app alerts notify you when your friend unlocks +{REFERRER_SIGNUP_BONUS_COINS} coins (1st hen) or makes any deposit ({depositPercentLabel} lifetime share) — plus Bonus Crates at 3, 10 &amp; 25 friends!
+          Instant Telegram Bot &amp; in-app alerts notify you when your friend unlocks +{effectiveReferReward.toLocaleString()} coins (verified refer) or makes any deposit ({depositPercentLabel} lifetime share).
         </div>
 
         <div className="space-y-1.5">
@@ -428,97 +390,6 @@ export function FriendsView({
         )}
       </div>
 
-      {/* Referral Milestone Crates (3 / 10 / 25 Active Friends) */}
-      <div className="clay-card p-4 space-y-3">
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-9 h-9 rounded-2xl clay-icon-well flex items-center justify-center text-amber-600 dark:text-amber-400 shrink-0">
-              <Gift className="w-4 h-4" />
-            </div>
-            <div className="min-w-0">
-              <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 leading-tight">
-                Referral Milestone Crates
-              </h2>
-              <p className="text-[11px] text-stone-500 dark:text-stone-400">
-                Unlock bonus coins &amp; hens at 3, 10 &amp; 25 active friends
-              </p>
-            </div>
-          </div>
-          <span className="clay-card-warm !rounded-full text-xs font-extrabold font-mono-num px-2.5 py-1 text-amber-900 dark:text-amber-300 shrink-0">
-            {Math.max(profile.referralCount, activeCount)} active
-          </span>
-        </div>
-
-        <div className="space-y-2.5">
-          {REFERRAL_MILESTONE_CRATES.map((crate) => {
-            const effectiveActive = Math.max(profile.referralCount, activeCount);
-            const claimed = (profile.claimedReferralMilestones ?? []).includes(crate.targetActive);
-            const unlocked = effectiveActive >= crate.targetActive;
-            const pct = Math.min(100, Math.round((effectiveActive / crate.targetActive) * 100));
-
-            return (
-              <div
-                key={crate.targetActive}
-                className={`${claimed ? 'clay-card-mint' : 'clay-inset'} !rounded-2xl p-3 space-y-2`}
-              >
-                <div className="flex items-center justify-between gap-2">
-                  <div className="min-w-0">
-                    <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
-                      {crate.title} ({crate.targetActive} active friends)
-                    </div>
-                    <div className="text-[11px] font-bold text-amber-700 dark:text-amber-400 font-mono-num">
-                      +{crate.rewardCoins.toLocaleString()} coins
-                      {crate.bonusLeghorns > 0 ? ` + ${crate.bonusLeghorns} White Leghorn` : ''}
-                    </div>
-                  </div>
-                  {claimed ? (
-                    <span className="inline-flex items-center gap-1 rounded-xl bg-emerald-500/15 border border-emerald-500/30 px-2.5 py-1 text-[11px] font-extrabold text-emerald-800 dark:text-emerald-300 shrink-0">
-                      <Check className="w-3 h-3" />
-                      <span>Claimed</span>
-                    </span>
-                  ) : unlocked && onClaimReferralMilestone ? (
-                    <button
-                      type="button"
-                      onClick={() => onClaimReferralMilestone(crate.targetActive)}
-                      className="clay-btn clay-btn-amber px-3 py-1.5 rounded-xl text-xs font-extrabold shrink-0"
-                    >
-                      Claim Crate
-                    </button>
-                  ) : (
-                    <span className="text-[11px] font-extrabold font-mono-num text-stone-500 dark:text-stone-400 shrink-0">
-                      {effectiveActive}/{crate.targetActive}
-                    </span>
-                  )}
-                </div>
-                <div
-                  role="progressbar"
-                  aria-label={`${crate.title} progress`}
-                  aria-valuenow={Math.min(effectiveActive, crate.targetActive)}
-                  aria-valuemin={0}
-                  aria-valuemax={crate.targetActive}
-                  className="h-2.5 rounded-full bg-black/10 dark:bg-white/10 overflow-hidden p-[1px]"
-                >
-                  <motion.div
-                    initial={{ width: 0 }}
-                    animate={{ width: `${pct}%` }}
-                    transition={
-                      shouldReduceMotion
-                        ? { duration: 0 }
-                        : { duration: 0.65, ease: [0.16, 1, 0.3, 1] }
-                    }
-                    className={`h-full rounded-full ${
-                      unlocked
-                        ? 'bg-gradient-to-r from-emerald-400 to-emerald-500 clay-shimmer-bar'
-                        : 'bg-gradient-to-r from-amber-400 via-amber-500 to-emerald-500'
-                    }`}
-                  />
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-
       {/* Invited Friends Transparency List */}
       <div className="clay-card p-4 space-y-3">
         <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -536,23 +407,23 @@ export function FriendsView({
               </span>
             )}
             <span className="text-xs font-extrabold font-mono-num px-2.5 py-1 rounded-full bg-emerald-100 dark:bg-emerald-950/60 text-emerald-800 dark:text-emerald-300">
-              {Math.max(profile.referralCount, activeCount)} Active
+              {effectiveActiveCount} Verified
             </span>
           </div>
         </div>
 
         <div className="grid grid-cols-3 gap-2">
-          <div className="clay-card-warm !rounded-2xl p-2.5">
+          <div className="clay-card-mint !rounded-2xl p-2.5">
             <div className="flex items-center gap-1 text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
-              <EggIcon className="w-4 h-4 shrink-0" />
-              <span>{lifetimeReferralEggsEarned.toLocaleString()}</span>
+              <Users className="w-4 h-4 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span>{effectiveActiveCount.toLocaleString()}</span>
             </div>
-            <div className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">5% Eggs earned</div>
+            <div className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">Verified refers</div>
           </div>
           <div className="clay-inset p-2.5">
             <div className="flex items-center gap-1 text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">
               <CoinIcon className="w-4 h-4 shrink-0" />
-              <span>{profile.referralCoinsEarned.toLocaleString()}</span>
+              <span>+{profile.referralCoinsEarned.toLocaleString()}</span>
             </div>
             <div className="text-[11px] text-stone-500 dark:text-stone-400 mt-0.5">Coins earned</div>
           </div>
@@ -567,7 +438,7 @@ export function FriendsView({
         {invitedFriends.length === 0 ? (
           <div className="clay-inset p-5 text-center text-xs text-stone-500 dark:text-stone-400">
             No invited friends yet. Share your invite link to earn{' '}
-            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{REFERRER_SIGNUP_BONUS_COINS} coins</span> when they buy their 1st hen and a{' '}
+            <span className="font-bold text-emerald-700 dark:text-emerald-400">+{effectiveReferReward.toLocaleString()} coins</span> when they buy their 1st hen and a{' '}
             <span className="font-bold text-amber-700 dark:text-amber-400">{depositPercentLabel} lifetime deposit commission</span> from every friend!
           </div>
         ) : (
@@ -605,7 +476,7 @@ export function FriendsView({
                           </span>
                         ) : (
                           <span className="inline-flex items-center rounded-full bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/60 px-2 py-0.5 text-[10px] font-extrabold text-emerald-700 dark:text-emerald-300 shrink-0">
-                            Active · {eggPercentLabel}
+                            Verified
                           </span>
                         )}
                       </div>
@@ -623,22 +494,23 @@ export function FriendsView({
                   </div>
 
                   <div className="text-right shrink-0 space-y-0.5">
-                    <div className="inline-flex items-center justify-end gap-1 text-xs font-extrabold text-amber-700 dark:text-amber-400 font-mono-num">
-                      <EggIcon className="w-3.5 h-3.5 shrink-0" />
-                      <span>{friend.eggsGenerated.toLocaleString()} eggs</span>
-                    </div>
-                    <div className="text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
-                      {isPending ? (
-                        <span className="text-amber-700 dark:text-amber-400">Needs 1st hen</span>
-                      ) : (
-                        <>
-                          <span className="text-emerald-700 dark:text-emerald-400 font-bold">
-                            +{friend.coinsEarned.toLocaleString()} coins
-                          </span>
-                          {friend.toppedUpUsd > 0 ? ` · $${friend.toppedUpUsd.toFixed(2)}` : ''}
-                        </>
-                      )}
-                    </div>
+                    {isPending ? (
+                      <div className="text-[11px] font-bold text-amber-700 dark:text-amber-400 font-mono-num">
+                        Needs 1st hen
+                      </div>
+                    ) : (
+                      <>
+                        <div className="inline-flex items-center justify-end gap-1 text-xs font-extrabold text-emerald-700 dark:text-emerald-400 font-mono-num">
+                          <CoinIcon className="w-3.5 h-3.5 shrink-0" />
+                          <span>+{friend.coinsEarned.toLocaleString()} coins</span>
+                        </div>
+                        {friend.toppedUpUsd > 0 && (
+                          <div className="text-[11px] text-stone-500 dark:text-stone-400 font-mono-num">
+                            ${friend.toppedUpUsd.toFixed(2)} deposited
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </li>
               );

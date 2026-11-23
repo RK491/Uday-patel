@@ -290,14 +290,20 @@ export type ChannelVerificationMode =
 export interface RequiredTelegramChannel {
   id: string;
   handle: string;
+  chatId?: string;
   title: string;
   description: string;
   url: string;
   enabled?: boolean;
+  memberCount?: number;
+  botIsAdmin?: boolean;
+  botStatus?: string;
+  lastSyncedAtMs?: number;
 }
 
 export interface ChannelsConfig {
   enabled: boolean;
+  mustJoin?: boolean;
   channels: RequiredTelegramChannel[];
   getCodeChannelUrl?: string;
   updatedAtMs: number;
@@ -449,5 +455,11 @@ export interface MaintenanceConfig {
   message: string;
   estimatedReturn: string;
   updatedBy: string;
+  updatedAtMs: number;
+}
+
+export interface EconomyConfig {
+  minWithdrawEggs: number;
+  perReferRewardCoins: number;
   updatedAtMs: number;
 }

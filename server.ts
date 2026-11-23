@@ -24,6 +24,7 @@ import {
   startAfter,
   updateDoc,
   where,
+  writeBatch,
   type DocumentData,
   type DocumentReference,
   type DocumentSnapshot,
@@ -40,6 +41,7 @@ import {
   coinsToUsd,
   createDefaultProfile,
   DEFAULT_CHANNELS_CONFIG,
+  DEFAULT_ECONOMY_CONFIG,
   DEFAULT_GRAM_DEPOSIT_ADDRESS,
   DEFAULT_GRAM_JETTON_MASTER,
   DEFAULT_MAINTENANCE_CONFIG,
@@ -57,16 +59,17 @@ import {
   normalizeTelegramChannelHandle,
   PRIMARY_ADMIN_TELEGRAM_ID,
   PROMO_CODES,
-  REFERRED_WELCOME_BONUS_COINS,
   REFERRER_SIGNUP_BONUS_COINS,
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
+  resolveEconomyConfig,
   resolveMaintenanceConfig,
   SIGNUP_BONUS_COINS,
 } from './src/game/economy.ts';
 import type {
   ChannelCheckDiagnosticLog,
   ChannelsConfig,
+  EconomyConfig,
   MaintenanceConfig,
   RequiredTelegramChannel,
   SystemDiagnosticsSnapshot,
@@ -260,15 +263,11 @@ function sanitizeBotTokenInput(raw: unknown): string {
     .replace(/^bot(?=\d+:)/i, '');
 }
 
-const DEFAULT_BACKEND_TELEGRAM_BOT_TOKEN = sanitizeBotTokenInput(
-  '9048180333:AAHXOeaRz85sPRT57pyhNteKBZJ0j4gGREE',
-);
-
 const TELEGRAM_BOT_TOKEN_ENV = sanitizeBotTokenInput(
   process.env.TELEGRAM_BOT_TOKEN ||
     process.env.BOT_TOKEN ||
     process.env.TG_BOT_TOKEN ||
-    DEFAULT_BACKEND_TELEGRAM_BOT_TOKEN,
+    '',
 );
 const BONUS_PER_REFERRAL = Math.max(
   1,
@@ -401,11 +400,30 @@ function maskBotToken(token: string): string {
 }
 
 // ============================================================================
-// ADMIN PASSCODE CONFIGURATION (LOCKED IN CODE)
-// Passcode is strictly locked in `/server.ts` -> `DEFAULT_ADMIN_PASSCODE` ('924429').
-// Admin Panel passcode modifications are disabled.
+// ADMIN PASSCODE CONFIGURATION
+// Reads ADMIN_PASSCODE from server environment variables (.env / Secrets).
+// When unset in fresh environments, supports one-time scrypt-hashed claim setup
+// by an authorized Admin ID (locked once claimed or once ADMIN_PASSCODE is set).
 // ============================================================================
-export const DEFAULT_ADMIN_PASSCODE = '924429';
+function getEnvAdminPasscode(): string {
+  return normalizePasscodeInput(String(process.env.ADMIN_PASSCODE || '').trim());
+}
+
+interface ClaimedAdminPasscodeRecord {
+  salt: string;
+  hash: string;
+  claimedBy: string;
+  updatedAtMs: number;
+}
+
+const ADMIN_SECURITY_FILE = path.resolve(__dirname, '.data', 'admin_security.json');
+let inMemoryClaimedAdminPasscode: ClaimedAdminPasscodeRecord | null = null;
+
+function hashPasscodeScrypt(passcode: string, saltHex?: string): { salt: string; hash: string } {
+  const salt = saltHex || crypto.randomBytes(16).toString('hex');
+  const derived = crypto.scryptSync(passcode, salt, 32).toString('hex');
+  return { salt, hash: derived };
+}
 
 async function getFreshDoc(ref: DocumentReference<DocumentData>): Promise<DocumentSnapshot<DocumentData>> {
   try {
@@ -416,13 +434,51 @@ async function getFreshDoc(ref: DocumentReference<DocumentData>): Promise<Docume
 }
 
 async function loadActiveAdminSecurity(): Promise<{
-  custom: null;
-  source: 'default';
+  claimed: ClaimedAdminPasscodeRecord | null;
+  source: 'env' | 'server_file' | 'unconfigured';
   updatedAtMs: number;
 }> {
+  const envPass = getEnvAdminPasscode();
+  if (envPass) {
+    return {
+      claimed: null,
+      source: 'env',
+      updatedAtMs: 0,
+    };
+  }
+  if (inMemoryClaimedAdminPasscode) {
+    return {
+      claimed: inMemoryClaimedAdminPasscode,
+      source: 'server_file',
+      updatedAtMs: inMemoryClaimedAdminPasscode.updatedAtMs,
+    };
+  }
+  try {
+    if (fs.existsSync(ADMIN_SECURITY_FILE)) {
+      const raw = fs.readFileSync(ADMIN_SECURITY_FILE, 'utf8');
+      const d = JSON.parse(raw) as Partial<ClaimedAdminPasscodeRecord>;
+      const salt = String(d?.salt || '').trim();
+      const hash = String(d?.hash || '').trim();
+      if (salt && hash) {
+        inMemoryClaimedAdminPasscode = {
+          salt,
+          hash,
+          claimedBy: String(d?.claimedBy || '').slice(0, 64),
+          updatedAtMs: Math.max(0, Number(d?.updatedAtMs ?? 0) || 0),
+        };
+        return {
+          claimed: inMemoryClaimedAdminPasscode,
+          source: 'server_file',
+          updatedAtMs: inMemoryClaimedAdminPasscode.updatedAtMs,
+        };
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
   return {
-    custom: null,
-    source: 'default',
+    claimed: null,
+    source: 'unconfigured',
     updatedAtMs: 0,
   };
 }
@@ -453,19 +509,39 @@ function normalizePasscodeInput(raw: string): string {
 
 async function verifyAdminPasscodeAsync(provided: string): Promise<{
   ok: boolean;
-  source: 'default';
+  source: 'env' | 'server_file' | 'unconfigured';
   updatedAtMs: number;
+  needsSetup?: boolean;
 }> {
   const cleanProvided = normalizePasscodeInput(provided);
-  if (!cleanProvided) {
-    return { ok: false, source: 'default', updatedAtMs: 0 };
+  const envPass = getEnvAdminPasscode();
+  if (envPass) {
+    if (!cleanProvided) {
+      return { ok: false, source: 'env', updatedAtMs: 0 };
+    }
+    const a = Buffer.from(cleanProvided, 'utf8');
+    const b = Buffer.from(envPass, 'utf8');
+    return {
+      ok: a.length === b.length && crypto.timingSafeEqual(a, b),
+      source: 'env',
+      updatedAtMs: 0,
+    };
   }
-  const a = Buffer.from(cleanProvided, 'utf8');
-  const b = Buffer.from(DEFAULT_ADMIN_PASSCODE, 'utf8');
+
+  const security = await loadActiveAdminSecurity();
+  if (!security.claimed) {
+    return { ok: false, source: 'unconfigured', updatedAtMs: 0, needsSetup: true };
+  }
+  if (!cleanProvided) {
+    return { ok: false, source: 'server_file', updatedAtMs: security.updatedAtMs };
+  }
+  const check = hashPasscodeScrypt(cleanProvided, security.claimed.salt);
+  const a = Buffer.from(check.hash, 'hex');
+  const b = Buffer.from(security.claimed.hash, 'hex');
   return {
     ok: a.length === b.length && crypto.timingSafeEqual(a, b),
-    source: 'default',
-    updatedAtMs: 0,
+    source: 'server_file',
+    updatedAtMs: security.updatedAtMs,
   };
 }
 
@@ -1034,45 +1110,209 @@ async function resolveRawDepositAddress(): Promise<string> {
   return '';
 }
 
+const CHANNELS_CONFIG_FILE = path.resolve(__dirname, '.data', 'channels_config.json');
+const ECONOMY_CONFIG_FILE = path.resolve(__dirname, '.data', 'economy_config.json');
+
+function normalizeChannelsConfigPayload(
+  raw?: (Omit<Partial<ChannelsConfig>, 'channels'> & { channels?: Array<Partial<RequiredTelegramChannel>> }) | null,
+): ChannelsConfig {
+  const rawList = Array.isArray(raw?.channels) ? raw.channels : [];
+  const parsedChannels: RequiredTelegramChannel[] = rawList
+    .map((item, idx) =>
+      item && typeof item === 'object'
+        ? normalizeTelegramChannelEntry(item as Partial<RequiredTelegramChannel>, idx)
+        : null,
+    )
+    .filter((item): item is RequiredTelegramChannel => Boolean(item))
+    .slice(0, 10);
+
+  return {
+    enabled: raw?.enabled !== false,
+    mustJoin: raw?.mustJoin === true,
+    channels: parsedChannels,
+    getCodeChannelUrl:
+      typeof raw?.getCodeChannelUrl === 'string' && raw.getCodeChannelUrl.trim()
+        ? String(raw.getCodeChannelUrl).trim().slice(0, 256)
+        : DEFAULT_CHANNELS_CONFIG.getCodeChannelUrl,
+    updatedAtMs: Math.max(0, Math.floor(Number(raw?.updatedAtMs ?? 0) || 0)),
+  };
+}
+
+function loadChannelsConfigFromDisk(): ChannelsConfig | null {
+  try {
+    if (!fs.existsSync(CHANNELS_CONFIG_FILE)) return null;
+    const raw = fs.readFileSync(CHANNELS_CONFIG_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<ChannelsConfig>;
+    return normalizeChannelsConfigPayload(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function persistChannelsConfigToDisk(cfg: ChannelsConfig): void {
+  try {
+    const dir = path.dirname(CHANNELS_CONFIG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(CHANNELS_CONFIG_FILE, JSON.stringify(cfg), 'utf8');
+  } catch {
+    // Non-fatal on read-only containers
+  }
+}
+
+async function saveChannelsConfigOnServer(
+  input: Omit<Partial<ChannelsConfig>, 'channels'> & { channels?: Array<Partial<RequiredTelegramChannel>> },
+): Promise<ChannelsConfig> {
+  const nowMs = Date.now();
+  const payload: ChannelsConfig = {
+    ...normalizeChannelsConfigPayload(input),
+    updatedAtMs: nowMs,
+  };
+  persistChannelsConfigToDisk(payload);
+
+  if (serverDb) {
+    try {
+      const writeDoc: Record<string, unknown> = {
+        enabled: payload.enabled,
+        mustJoin: Boolean(payload.mustJoin),
+        channels: payload.channels,
+        updatedAtMs: payload.updatedAtMs,
+        updatedAt: serverTimestamp(),
+      };
+      if (payload.getCodeChannelUrl) {
+        writeDoc.getCodeChannelUrl = payload.getCodeChannelUrl;
+      }
+      await setDoc(doc(serverDb, 'app_config', 'channels'), writeDoc);
+    } catch {
+      // Disk copy already persisted above
+    }
+  }
+  return payload;
+}
+
 async function loadChannelsConfigWithSourceFromFirestore(): Promise<{
   config: ChannelsConfig;
   fromFirestore: boolean;
 }> {
-  if (!serverDb) return { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
+  const diskCfg = loadChannelsConfigFromDisk();
+  if (!serverDb) {
+    return diskCfg
+      ? { config: diskCfg, fromFirestore: true }
+      : { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
+  }
   try {
     const snap = await getFreshDoc(doc(serverDb, 'app_config', 'channels'));
-    if (!snap.exists()) return { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
-    const d = snap.data();
-    const rawList = Array.isArray(d.channels) ? d.channels : [];
-    const parsedChannels: RequiredTelegramChannel[] = rawList
-      .map((item, idx) =>
-        item && typeof item === 'object'
-          ? normalizeTelegramChannelEntry(item as Partial<RequiredTelegramChannel>, idx)
-          : null,
-      )
-      .filter((item): item is RequiredTelegramChannel => Boolean(item))
-      .slice(0, 10);
-
-    return {
-      config: {
-        enabled: d.enabled !== false,
-        channels: parsedChannels,
-        getCodeChannelUrl:
-          typeof d.getCodeChannelUrl === 'string' && d.getCodeChannelUrl.trim()
-            ? String(d.getCodeChannelUrl).trim().slice(0, 256)
-            : DEFAULT_CHANNELS_CONFIG.getCodeChannelUrl,
-        updatedAtMs: Number(d.updatedAtMs ?? 0),
-      },
-      fromFirestore: true,
-    };
+    if (!snap.exists()) {
+      return diskCfg
+        ? { config: diskCfg, fromFirestore: true }
+        : { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
+    }
+    const fsCfg = normalizeChannelsConfigPayload(snap.data() as Partial<ChannelsConfig>);
+    if (diskCfg && diskCfg.updatedAtMs > fsCfg.updatedAtMs) {
+      return { config: diskCfg, fromFirestore: true };
+    }
+    persistChannelsConfigToDisk(fsCfg);
+    return { config: fsCfg, fromFirestore: true };
   } catch {
-    return { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
+    return diskCfg
+      ? { config: diskCfg, fromFirestore: true }
+      : { config: DEFAULT_CHANNELS_CONFIG, fromFirestore: false };
   }
 }
 
 async function loadChannelsConfigFromFirestore(): Promise<ChannelsConfig> {
   const res = await loadChannelsConfigWithSourceFromFirestore();
   return res.config;
+}
+
+function getDefaultEconomyFromEnv(): EconomyConfig {
+  return resolveEconomyConfig({
+    minWithdrawEggs: DEFAULT_ECONOMY_CONFIG.minWithdrawEggs,
+    perReferRewardCoins: BONUS_PER_REFERRAL,
+    updatedAtMs: 0,
+  });
+}
+
+function loadEconomyConfigFromDisk(): EconomyConfig | null {
+  try {
+    if (!fs.existsSync(ECONOMY_CONFIG_FILE)) return null;
+    const raw = fs.readFileSync(ECONOMY_CONFIG_FILE, 'utf8');
+    const parsed = JSON.parse(raw) as Partial<EconomyConfig>;
+    return resolveEconomyConfig(parsed);
+  } catch {
+    return null;
+  }
+}
+
+function persistEconomyConfigToDisk(cfg: EconomyConfig): void {
+  try {
+    const dir = path.dirname(ECONOMY_CONFIG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(ECONOMY_CONFIG_FILE, JSON.stringify(cfg), 'utf8');
+  } catch {
+    // Non-fatal
+  }
+}
+
+let cachedEconomyConfig: EconomyConfig =
+  loadEconomyConfigFromDisk() || getDefaultEconomyFromEnv();
+
+function getFastPerReferRewardCoins(): number {
+  return cachedEconomyConfig.perReferRewardCoins;
+}
+
+async function loadEconomyConfig(): Promise<EconomyConfig> {
+  const diskCfg = loadEconomyConfigFromDisk();
+  if (!serverDb) {
+    if (diskCfg) {
+      cachedEconomyConfig = diskCfg;
+      return diskCfg;
+    }
+    return cachedEconomyConfig;
+  }
+  try {
+    const snap = await getFreshDoc(doc(serverDb, 'app_config', 'economy'));
+    if (!snap.exists()) {
+      const fallback = diskCfg || getDefaultEconomyFromEnv();
+      cachedEconomyConfig = fallback;
+      return fallback;
+    }
+    const fsCfg = resolveEconomyConfig(snap.data() as Partial<EconomyConfig>);
+    if (diskCfg && diskCfg.updatedAtMs > fsCfg.updatedAtMs) {
+      cachedEconomyConfig = diskCfg;
+      return diskCfg;
+    }
+    cachedEconomyConfig = fsCfg;
+    persistEconomyConfigToDisk(fsCfg);
+    return fsCfg;
+  } catch {
+    return diskCfg || cachedEconomyConfig;
+  }
+}
+
+async function saveEconomyConfigOnServer(
+  input: Partial<EconomyConfig>,
+): Promise<EconomyConfig> {
+  const payload = resolveEconomyConfig({
+    ...input,
+    updatedAtMs: Date.now(),
+  });
+  cachedEconomyConfig = payload;
+  persistEconomyConfigToDisk(payload);
+  if (serverDb) {
+    try {
+      await setDoc(doc(serverDb, 'app_config', 'economy'), {
+        ...payload,
+        updatedAt: serverTimestamp(),
+      });
+    } catch {
+      // Disk copy already persisted above
+    }
+  }
+  return payload;
 }
 
 async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
@@ -1521,7 +1761,10 @@ async function formatTelegramChannelCheckError(
   return desc || `Could not confirm ${handle} membership. Make sure our bot is Admin there.`;
 }
 
-async function fetchTelegramChatMember(chatId: string, userId: string): Promise<{
+async function fetchTelegramChatMember(
+  chatIdOrChannel: string | { handle?: string; chatId?: string },
+  userId: string,
+): Promise<{
   ok: boolean;
   userNotFound?: boolean;
   errorCode?: number;
@@ -1543,13 +1786,6 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
     };
   };
 
-  const cleanedInput = String(chatId || '').trim().replace(/\/+$/, '');
-  const normalizedHandle = normalizeTelegramChannelHandle(cleanedInput).handle || cleanedInput;
-  const primary = await tryLookup(normalizedHandle);
-  if (primary.ok && primary.result) {
-    return { ok: true, targetChatIdUsed: normalizedHandle, result: primary.result };
-  }
-
   const isTelegramUserNotFoundDescription = (desc: string): boolean => {
     const low = desc.toLowerCase();
     return (
@@ -1560,55 +1796,188 @@ async function fetchTelegramChatMember(chatId: string, userId: string): Promise<
     );
   };
 
-  const primaryDesc = String(primary.description || '').toLowerCase();
-  if (isTelegramUserNotFoundDescription(primaryDesc)) {
-    return {
-      ok: false,
-      userNotFound: true,
-      errorCode: primary.error_code,
-      targetChatIdUsed: normalizedHandle,
-      description: redactBotToken(primary.description || ''),
-    };
-  }
+  const rawInputs =
+    typeof chatIdOrChannel === 'string'
+      ? [chatIdOrChannel]
+      : [String(chatIdOrChannel.chatId || ''), String(chatIdOrChannel.handle || '')];
 
-  // Retry with -100 prefix if admin saved positive numeric ID or -groupId for a channel/supergroup
-  const needsSupergroupRetry =
-    primaryDesc.includes('chat not found') || primaryDesc.includes('upgraded');
-  if (needsSupergroupRetry) {
-    const supergroupCandidate = /^\d{6,16}$/.test(normalizedHandle)
-      ? `-100${normalizedHandle}`
-      : /^-\d{6,16}$/.test(normalizedHandle) && !normalizedHandle.startsWith('-100')
-        ? `-100${normalizedHandle.slice(1)}`
-        : '';
-    if (supergroupCandidate) {
-      const retried = await tryLookup(supergroupCandidate);
-      if (retried.ok && retried.result) {
-        return { ok: true, targetChatIdUsed: supergroupCandidate, result: retried.result };
-      }
-      const retryDesc = String(retried.description || '').toLowerCase();
-      if (isTelegramUserNotFoundDescription(retryDesc)) {
-        return {
-          ok: false,
-          userNotFound: true,
-          errorCode: retried.error_code,
-          targetChatIdUsed: supergroupCandidate,
-          description: redactBotToken(retried.description || ''),
-        };
-      }
-      return {
-        ok: false,
-        errorCode: retried.error_code ?? primary.error_code,
-        targetChatIdUsed: supergroupCandidate,
-        description: redactBotToken(retried.description || primary.description || ''),
-      };
+  const candidates: string[] = [];
+  for (const raw of rawInputs) {
+    const cleaned = raw.trim().replace(/\/+$/, '');
+    if (!cleaned) continue;
+    const norm = normalizeTelegramChannelHandle(cleaned).handle || cleaned;
+    if (norm && !candidates.includes(norm)) candidates.push(norm);
+    if (/^\d{6,16}$/.test(norm)) {
+      const sg = `-100${norm}`;
+      if (!candidates.includes(sg)) candidates.push(sg);
+    } else if (/^-\d{6,16}$/.test(norm) && !norm.startsWith('-100')) {
+      const sg = `-100${norm.slice(1)}`;
+      if (!candidates.includes(sg)) candidates.push(sg);
     }
   }
 
-  return {
+  let lastFailure: {
+    ok: false;
+    userNotFound?: boolean;
+    errorCode?: number;
+    description?: string;
+    targetChatIdUsed?: string;
+  } = {
     ok: false,
-    errorCode: primary.error_code,
-    targetChatIdUsed: normalizedHandle,
-    description: redactBotToken(primary.description || ''),
+    description: 'Channel target is missing',
+  };
+
+  for (const target of candidates) {
+    const res = await tryLookup(target);
+    if (res.ok && res.result) {
+      return { ok: true, targetChatIdUsed: target, result: res.result };
+    }
+    const desc = String(res.description || '');
+    if (isTelegramUserNotFoundDescription(desc)) {
+      return {
+        ok: false,
+        userNotFound: true,
+        errorCode: res.error_code,
+        targetChatIdUsed: target,
+        description: redactBotToken(desc),
+      };
+    }
+    lastFailure = {
+      ok: false,
+      errorCode: res.error_code,
+      targetChatIdUsed: target,
+      description: redactBotToken(desc),
+    };
+  }
+
+  return lastFailure;
+}
+
+async function syncSingleChannelWithTelegramBot(
+  ch: RequiredTelegramChannel,
+  botId: string,
+  botToken: string,
+): Promise<{
+  channel: RequiredTelegramChannel;
+  ok: boolean;
+  botIsAdmin: boolean;
+  botStatus: string;
+  error?: string;
+}> {
+  const candidates = Array.from(
+    new Set(
+      [ch.chatId, ch.handle]
+        .map((v) => String(v || '').trim())
+        .filter(Boolean),
+    ),
+  );
+  if (candidates.length === 0) {
+    return {
+      channel: ch,
+      ok: false,
+      botIsAdmin: false,
+      botStatus: 'invalid_channel',
+      error: 'Missing channel handle or -100 chat ID',
+    };
+  }
+
+  let chatInfo: {
+    id?: number | string;
+    title?: string;
+    username?: string;
+    invite_link?: string;
+    type?: string;
+  } | null = null;
+  let lastChatError = '';
+
+  for (const target of candidates) {
+    try {
+      const res = await fetch(
+        `https://api.telegram.org/bot${botToken}/getChat?chat_id=${encodeURIComponent(target)}`,
+        { signal: AbortSignal.timeout(7000) },
+      );
+      const data = (await res.json()) as {
+        ok?: boolean;
+        description?: string;
+        result?: {
+          id?: number | string;
+          title?: string;
+          username?: string;
+          invite_link?: string;
+          type?: string;
+        };
+      };
+      if (data.ok && data.result?.id !== undefined) {
+        chatInfo = data.result;
+        break;
+      }
+      lastChatError = redactBotToken(data.description || 'getChat failed');
+    } catch (err) {
+      lastChatError = err instanceof Error ? err.message : 'Telegram network error';
+    }
+  }
+
+  const resolvedChatId = chatInfo?.id !== undefined ? String(chatInfo.id) : ch.chatId || '';
+  const botMember = await fetchTelegramChatMember(
+    { chatId: resolvedChatId || ch.chatId, handle: ch.handle },
+    botId,
+  );
+  const botStatus = botMember.ok && botMember.result
+    ? String(botMember.result.status || 'left').toLowerCase()
+    : 'api_error';
+  const botIsAdmin = botStatus === 'administrator' || botStatus === 'creator';
+
+  let memberCount = ch.memberCount;
+  if (resolvedChatId || ch.handle) {
+    try {
+      const countTarget = resolvedChatId || ch.handle;
+      const countRes = await fetch(
+        `https://api.telegram.org/bot${botToken}/getChatMemberCount?chat_id=${encodeURIComponent(countTarget)}`,
+        { signal: AbortSignal.timeout(6000) },
+      );
+      const countData = (await countRes.json()) as { ok?: boolean; result?: number };
+      if (countData.ok && typeof countData.result === 'number' && Number.isFinite(countData.result)) {
+        memberCount = Math.max(0, Math.floor(countData.result));
+      }
+    } catch {
+      // Optional member count enrichment
+    }
+  }
+
+  const liveUsername = chatInfo?.username ? `@${chatInfo.username.replace(/^@+/, '')}` : '';
+  const nextHandle = liveUsername || (ch.handle && ch.handle.startsWith('@') ? ch.handle : resolvedChatId || ch.handle);
+  const nextTitle = chatInfo?.title ? String(chatInfo.title).trim().slice(0, 60) : ch.title;
+  const nextUrl =
+    liveUsername
+      ? `https://t.me/${liveUsername.replace(/^@+/, '')}`
+      : chatInfo?.invite_link && /^https?:\/\//i.test(chatInfo.invite_link)
+        ? chatInfo.invite_link.slice(0, 256)
+        : ch.url;
+
+  const syncedChannel: RequiredTelegramChannel = {
+    ...ch,
+    handle: nextHandle.slice(0, 64),
+    ...(resolvedChatId ? { chatId: resolvedChatId.slice(0, 64) } : {}),
+    title: nextTitle,
+    url: nextUrl,
+    ...(typeof memberCount === 'number' ? { memberCount } : {}),
+    botIsAdmin,
+    botStatus: botStatus.slice(0, 32),
+    lastSyncedAtMs: Date.now(),
+  };
+
+  const errMsg = !chatInfo
+    ? lastChatError || botMember.description || 'Could not sync channel info'
+    : !botIsAdmin
+      ? botMember.description || `Bot status is "${botStatus}" — promote bot to Admin in ${syncedChannel.handle}`
+      : undefined;
+
+  return {
+    channel: syncedChannel,
+    ok: Boolean(chatInfo) && botIsAdmin,
+    botIsAdmin,
+    botStatus,
+    ...(errMsg ? { error: errMsg } : {}),
   };
 }
 
@@ -1946,7 +2315,7 @@ async function applyReferralInServerDb(params: {
     const referralDocRef = doc(serverDb, 'players', referrerUid, 'referrals', referredUid);
 
     const nowMs = Date.now();
-    const rewardCoins = BONUS_PER_REFERRAL;
+    const rewardCoins = (await loadEconomyConfig()).perReferRewardCoins;
     let alreadyLinked = false;
     let existingReferralActivated = false;
     let existingReferrerUid = '';
@@ -2003,13 +2372,12 @@ async function applyReferralInServerDb(params: {
           String(rd.handle || params.handle || ''),
           referredUid,
         ).slice(0, 40);
-        nextReferredCoins = Math.max(-100_000_000, (Number(rd.coins ?? 0) || 0) + REFERRED_WELCOME_BONUS_COINS);
+        nextReferredCoins = Math.max(-100_000_000, Number(rd.coins ?? 0) || 0);
         tx.update(
           referredPlayerRef,
           toServerFirestorePlayerUpdatePayload(rd, referredUid, {
             referredBy: referrerUid,
             referralActivated: hasOwnedChicken,
-            coins: nextReferredCoins,
           }),
         );
       } else {
@@ -2020,7 +2388,7 @@ async function applyReferralInServerDb(params: {
           nowMs,
           String(params.photoUrl || ''),
         ).profile;
-        nextReferredCoins = seeded.coins + REFERRED_WELCOME_BONUS_COINS;
+        nextReferredCoins = seeded.coins;
         tx.set(
           referredPlayerRef,
           toServerFirestorePlayerCreatePayload({
@@ -2048,7 +2416,7 @@ async function applyReferralInServerDb(params: {
         }
       }
 
-      // Link immediately with status 'pending'; +150 coin referrer bonus unlocks on 1st hen (miner) purchase.
+      // Link immediately with status 'pending'; verified refer coin bonus unlocks on 1st hen purchase.
       // If user already owns a hen (e.g. delayed recovery), activate and award immediately.
       tx.set(referralDocRef, {
         referrerUid,
@@ -2058,18 +2426,6 @@ async function applyReferralInServerDb(params: {
         status: hasOwnedChicken ? 'active' : 'pending',
         coinsEarned: hasOwnedChicken ? rewardCoins : 0,
         toppedUpUsd: 0,
-        createdAtMs: nowMs,
-        createdAt: serverTimestamp(),
-      });
-
-      tx.set(doc(serverDb, 'players', referredUid, 'transactions', `tx_ref_join_${nowMs}`), {
-        userId: referredUid,
-        type: 'referral',
-        title: `Joined via ${referrerName}'s referral`.slice(0, 80),
-        amount: REFERRED_WELCOME_BONUS_COINS,
-        currency: 'coins',
-        usdValue: coinsToUsd(REFERRED_WELCOME_BONUS_COINS),
-        status: 'completed',
         createdAtMs: nowMs,
         createdAt: serverTimestamp(),
       });
@@ -2193,8 +2549,8 @@ async function applyReferralInServerDb(params: {
       referrerUid,
       referrerName,
       coinsRewarded: activatedOnLink ? rewardCoins : 0,
-      referredCoinsAwarded: REFERRED_WELCOME_BONUS_COINS,
-      referredBonusCoins: REFERRED_WELCOME_BONUS_COINS,
+      referredCoinsAwarded: 0,
+      referredBonusCoins: 0,
       nextReferredCoins,
       botDmSent,
       botDmEvent,
@@ -2251,6 +2607,7 @@ async function sendReferrerJoinedBotDm(params: {
     referredName: params.referredName,
     referredHandle: params.referredHandle,
     rewardCoins: params.rewardCoins,
+    perReferRewardCoins: getFastPerReferRewardCoins(),
     totalReferrals: params.totalReferrals,
     totalReferralCoins: params.totalReferralCoins,
   });
@@ -2344,7 +2701,7 @@ async function activateReferralInServerDb(params: {
   const referredUid = params.referredUid.trim();
   const referredPlayerRef = doc(serverDb, 'players', referredUid);
   const referredLbRef = doc(serverDb, 'leaderboard', referredUid);
-  const rewardCoins = BONUS_PER_REFERRAL;
+  const rewardCoins = (await loadEconomyConfig()).perReferRewardCoins;
   const nowMs = Date.now();
 
   try {
@@ -2698,11 +3055,10 @@ function resolveTelegramUserFromRequest(
   const activeBotToken = getTelegramBotToken();
   const headerInit = String(req.headers['x-telegram-init-data'] || '').trim();
   const bodyInit = String(body?.initData || '').trim();
-  const queryInit = typeof req.query.initData === 'string' ? req.query.initData.trim() : '';
-  const rawInitData = headerInit || bodyInit || queryInit;
+  const rawInitData = headerInit || bodyInit;
 
   if (rawInitData) {
-    const check = verifyTelegramInitData(rawInitData, activeBotToken);
+    const check = verifyTelegramInitData(rawInitData, activeBotToken, { allowClockSkew: true });
     if (check.valid && check.playerId && check.user?.id) {
       return {
         valid: true,
@@ -2724,7 +3080,7 @@ function resolveTelegramUserFromRequest(
 
   const verifiedActor = resolveVerifiedPlayerActor({
     req,
-    token: body?.token || (typeof req.query.token === 'string' ? req.query.token : undefined),
+    token: body?.token,
   });
   const numericId = verifiedActor ? extractTelegramNumericUserId(verifiedActor) : null;
   if (verifiedActor && numericId) {
@@ -3122,15 +3478,20 @@ function getFastBotUsername(): string {
 
 function buildStartWelcomeText(params: {
   greetName: string;
+  perReferRewardCoins?: number;
   referralStatusLine?: string;
 }): string {
+  const referBonus = Math.max(
+    0,
+    Math.round(params.perReferRewardCoins ?? getFastPerReferRewardCoins()),
+  );
   const refSection = params.referralStatusLine ? `\n\n${params.referralStatusLine}` : '';
   return [
     `🐔 <b>Welcome to Alpha Gram, ${params.greetName}!</b>`,
     '',
     '🐣 <b>Starter Pack:</b> <b>+1,000 Coins</b> ready to hatch your first hens',
     '🥚 <b>24/7 Mining:</b> Collect eggs hourly &amp; charge <b>3× Coop Fever</b>',
-    `👥 <b>Invite &amp; Earn:</b> <b>+${BONUS_PER_REFERRAL} Coins</b> per friend + <b>5%</b> deposit &amp; egg share`,
+    `👥 <b>Invite &amp; Earn:</b> <b>+${referBonus.toLocaleString()} Coins</b> per friend + <b>5%</b> deposit &amp; egg share`,
     '💎 <b>TON Payouts:</b> Swap eggs directly for <b>GRAM</b> on TON',
     refSection,
     '👇 Tap below to open your farm &amp; start earning!',
@@ -3164,6 +3525,7 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
     const greetName = escapeHtml(
       String(msg.from.first_name || msg.from.username || 'Farmer').trim().slice(0, 50) || 'Farmer',
     );
+    const perReferBonus = getFastPerReferRewardCoins();
     const replyMarkup = {
       inline_keyboard: [
         [
@@ -3175,7 +3537,7 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
         ],
         [
           buildDirectPrivateMiniAppButton(
-            `👥 Invite & Earn +${BONUS_PER_REFERRAL} Coins`,
+            `👥 Invite & Earn +${perReferBonus.toLocaleString()} Coins`,
             botUsername,
             'friends',
           ),
@@ -3194,7 +3556,7 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
               text: buildStartWelcomeText({
                 greetName,
                 referralStatusLine: hasStartRef
-                  ? `🎁 <i>Checking invite link &amp; crediting +${REFERRED_WELCOME_BONUS_COINS} Welcome Coins...</i>`
+                  ? '🎁 <i>Checking invite link...</i>'
                   : undefined,
               }),
               parse_mode: 'HTML',
@@ -3257,10 +3619,10 @@ async function processTelegramUpdate(update: TelegramUpdatePayload): Promise<boo
         updatedRefStatus = refResult.activated
           ? `🎁 <b>Referral Applied!</b> Joined via <b>${escapeHtml(
               refResult.referrerName || 'your friend',
-            )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited to your farm!`
+            )}</b>.`
           : `🎁 <b>Referral Linked!</b> Joined via <b>${escapeHtml(
               refResult.referrerName || 'your friend',
-            )}</b> — <b>+${REFERRED_WELCOME_BONUS_COINS} Welcome Coins</b> credited! Buy your first hen in the Mini App to unlock their <b>+${BONUS_PER_REFERRAL} Coin</b> bonus.`;
+            )}</b> — buy your first hen in the Mini App to verify your referral (<b>+${perReferBonus.toLocaleString()} Coins</b> for your friend).`;
       } else if (
         refResult.ok &&
         (refResult.reason === 'already_linked' ||
@@ -3746,15 +4108,133 @@ function ensureBotPollerRunning(): void {
 async function startServer() {
   const app = express();
   app.disable('x-powered-by');
+  app.set('trust proxy', 1);
+
+  const expandCloudRunOrigins = (rawUrl: string): string[] => {
+    const out: string[] = [];
+    try {
+      const parsed = new URL(rawUrl);
+      if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') return out;
+      out.push(parsed.origin.toLowerCase());
+      const host = parsed.hostname.toLowerCase();
+      if (host.startsWith('ais-dev-')) {
+        const pairedHost = `ais-pre-${host.slice('ais-dev-'.length)}`;
+        out.push(`${parsed.protocol}//${pairedHost}${parsed.port ? `:${parsed.port}` : ''}`);
+      } else if (host.startsWith('ais-pre-')) {
+        const pairedHost = `ais-dev-${host.slice('ais-pre-'.length)}`;
+        out.push(`${parsed.protocol}//${pairedHost}${parsed.port ? `:${parsed.port}` : ''}`);
+      }
+    } catch {
+      // Ignore malformed URL
+    }
+    return out;
+  };
+
+  const extractRequestHosts = (req: express.Request): string[] => {
+    const hosts: string[] = [];
+    const pushRaw = (val: unknown) => {
+      if (typeof val !== 'string' || !val.trim()) return;
+      for (const part of val.split(',')) {
+        const clean = part.trim().toLowerCase();
+        if (clean) hosts.push(clean);
+      }
+    };
+    pushRaw(req.headers['x-forwarded-host']);
+    pushRaw(req.headers['x-original-host']);
+    pushRaw(req.headers.host);
+    const forwarded = String(req.headers.forwarded || '');
+    if (forwarded) {
+      const hostMatch = forwarded.match(/(?:^|[;\s,])host="?([^";,\s]+)"?/i);
+      if (hostMatch?.[1]) {
+        hosts.push(hostMatch[1].trim().toLowerCase());
+      }
+    }
+    return hosts;
+  };
+
+  const servicePrefixes = (() => {
+    const prefixes = new Set<string>();
+    const rawService = String(process.env.K_SERVICE || '').trim().toLowerCase();
+    if (rawService.startsWith('ais-dev-')) {
+      const suffix = rawService.slice('ais-dev-'.length);
+      prefixes.add(`ais-dev-${suffix}-`);
+      prefixes.add(`ais-pre-${suffix}-`);
+    } else if (rawService.startsWith('ais-pre-')) {
+      const suffix = rawService.slice('ais-pre-'.length);
+      prefixes.add(`ais-pre-${suffix}-`);
+      prefixes.add(`ais-dev-${suffix}-`);
+    }
+    return Array.from(prefixes);
+  })();
+
+  const isAllowedCorsOrigin = (originHeader: string, req: express.Request): boolean => {
+    try {
+      const originUrl = new URL(originHeader);
+      if (originUrl.protocol !== 'https:' && originUrl.protocol !== 'http:') {
+        return false;
+      }
+      if (String(req.headers['sec-fetch-site'] || '').trim().toLowerCase() === 'same-origin') {
+        return true;
+      }
+      const originHost = originUrl.host.toLowerCase();
+      const originNormalized = originUrl.origin.toLowerCase();
+      const hostname = originUrl.hostname.toLowerCase();
+
+      const requestHosts = extractRequestHosts(req);
+      if (requestHosts.some((h) => h === originHost)) {
+        return true;
+      }
+      if (hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]') {
+        return true;
+      }
+      if (
+        hostname === 'web.telegram.org' ||
+        hostname.endsWith('.web.telegram.org') ||
+        hostname === 't.me'
+      ) {
+        return originUrl.protocol === 'https:';
+      }
+      if (
+        originUrl.protocol === 'https:' &&
+        hostname.endsWith('.run.app') &&
+        servicePrefixes.some((prefix) => hostname.startsWith(prefix))
+      ) {
+        return true;
+      }
+      const configuredWebUrls = [
+        process.env.APP_URL || '',
+        process.env.SHARED_APP_URL || '',
+        process.env.WEBAPP_URL || '',
+        process.env.VITE_WEBAPP_URL || '',
+        cachedBotMenuWebAppUrl,
+      ];
+      for (const raw of configuredWebUrls) {
+        if (!raw) continue;
+        if (expandCloudRunOrigins(raw).includes(originNormalized)) {
+          return true;
+        }
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  };
+
   app.use((req, res, next) => {
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     const origin = String(req.headers.origin || '').trim();
     if (origin) {
+      if (!isAllowedCorsOrigin(origin, req)) {
+        if (req.method === 'OPTIONS') {
+          res.sendStatus(403);
+          return;
+        }
+        res.status(403).json({ ok: false, error: 'Cross-origin request denied.' });
+        return;
+      }
       res.setHeader('Access-Control-Allow-Origin', origin);
       res.setHeader('Vary', 'Origin');
-    } else {
-      res.setHeader('Access-Control-Allow-Origin', '*');
     }
     res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type,Authorization,x-telegram-init-data');
@@ -4135,12 +4615,14 @@ async function startServer() {
   });
 
   app.get('/api/config', async (_req, res) => {
-    const [channelsCfg, telegramBotUsername, adminSecurity, maintenanceCfg] = await Promise.all([
-      loadChannelsConfigFromFirestore(),
-      resolveTelegramBotUsername(),
-      loadActiveAdminSecurity(),
-      loadMaintenanceConfigFromFirestore(),
-    ]);
+    const [channelsCfg, telegramBotUsername, adminSecurity, maintenanceCfg, economyCfg] =
+      await Promise.all([
+        loadChannelsConfigFromFirestore(),
+        resolveTelegramBotUsername(),
+        loadActiveAdminSecurity(),
+        loadMaintenanceConfigFromFirestore(),
+        loadEconomyConfig(),
+      ]);
     const activeChannels = getActiveRequiredChannels(channelsCfg);
     res.json({
       gramDepositAddress: GRAM_DEPOSIT_ADDRESS,
@@ -4149,15 +4631,208 @@ async function startServer() {
       maxDepositCoins: MAX_DEPOSIT_COINS,
       payoutChannel: TELEGRAM_PAYOUT_CHANNEL,
       channelCheckEnabled: channelsCfg.enabled,
+      mustJoinEnabled: Boolean(channelsCfg.enabled && channelsCfg.mustJoin && activeChannels.length > 0),
       requiredChannels: activeChannels.map((c) => c.handle),
+      channelsConfig: channelsCfg,
+      economy: economyCfg,
+      minWithdrawEggs: economyCfg.minWithdrawEggs,
+      perReferRewardCoins: economyCfg.perReferRewardCoins,
       telegramBotConfigured: Boolean(getTelegramBotToken()),
       telegramBotUsername,
       telegramAppShortName: TELEGRAM_MINIAPP_SHORT_NAME,
       persistentLedgerEnabled: Boolean(serverDb),
       adminPasscodeSource: adminSecurity.source,
       adminPasscodeUpdatedAtMs: adminSecurity.updatedAtMs,
+      adminNeedsPasscodeSetup: adminSecurity.source === 'unconfigured',
       maintenance: maintenanceCfg,
     });
+  });
+
+  app.post('/api/admin/economy', async (req, res) => {
+    const body = (req.body || {}) as {
+      token?: string;
+      initData?: string;
+      minWithdrawEggs?: number;
+      perReferRewardCoins?: number;
+    };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    const minW = Math.round(Number(body.minWithdrawEggs));
+    const perRef = Math.round(Number(body.perReferRewardCoins));
+    if (!Number.isFinite(minW) || minW < 1 || minW > 1_000_000) {
+      res.status(400).json({ ok: false, error: 'Minimum withdrawal must be between 1 and 1,000,000 eggs.' });
+      return;
+    }
+    if (!Number.isFinite(perRef) || perRef < 0 || perRef > 100_000) {
+      res.status(400).json({ ok: false, error: 'Per-refer reward must be between 0 and 100,000 coins.' });
+      return;
+    }
+    const saved = await saveEconomyConfigOnServer({
+      minWithdrawEggs: minW,
+      perReferRewardCoins: perRef,
+    });
+    recordServerLog(
+      'info',
+      'economy_config',
+      `Economy settings updated by ${resolvedPlayerId}`,
+      `minWithdrawEggs=${saved.minWithdrawEggs}, perReferRewardCoins=${saved.perReferRewardCoins}`,
+    );
+    res.json({ ok: true, economy: saved });
+  });
+
+  app.post('/api/admin/channels', async (req, res) => {
+    const body = (req.body || {}) as {
+      token?: string;
+      initData?: string;
+      enabled?: boolean;
+      mustJoin?: boolean;
+      channels?: Array<Partial<RequiredTelegramChannel>>;
+      getCodeChannelUrl?: string;
+    };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+    const saved = await saveChannelsConfigOnServer({
+      enabled: body.enabled !== false,
+      mustJoin: Boolean(body.mustJoin),
+      channels: Array.isArray(body.channels) ? body.channels : [],
+      getCodeChannelUrl: body.getCodeChannelUrl,
+    });
+    recordServerLog(
+      'info',
+      'channels_config',
+      `Channels config updated by ${resolvedPlayerId} (${saved.channels.length} channels, enabled=${saved.enabled}, mustJoin=${Boolean(saved.mustJoin)})`,
+    );
+    res.json({ ok: true, channelsConfig: saved });
+  });
+
+  app.post('/api/telegram/sync-channels', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`sync_ch:${ip}`, 25, 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: `Too many requests. Retry in ${rl.retryAfterSec}s.` });
+      return;
+    }
+    const body = (req.body || {}) as {
+      token?: string;
+      initData?: string;
+      enabled?: boolean;
+      mustJoin?: boolean;
+      channels?: Array<Partial<RequiredTelegramChannel>>;
+      getCodeChannelUrl?: string;
+    };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const resolvedPlayerId = resolveVerifiedAdminActor({
+      req,
+      token: body.token,
+      initData: body.initData,
+      extraAdminIds: effectiveExtraAdmins,
+    });
+    if (!resolvedPlayerId) {
+      res.status(403).json({ ok: false, error: 'Verified Admin session required.' });
+      return;
+    }
+
+    const activeBotToken = getTelegramBotToken();
+    if (!activeBotToken) {
+      res.json({
+        ok: false,
+        botConfigured: false,
+        error: 'Telegram Bot Token is not configured on backend. Save your Bot Token first.',
+      });
+      return;
+    }
+
+    const currentCfg = await loadChannelsConfigFromFirestore();
+    const inputChannels = Array.isArray(body.channels)
+      ? body.channels
+          .map((ch, idx) => normalizeTelegramChannelEntry(ch, idx))
+          .filter((ch): ch is RequiredTelegramChannel => Boolean(ch))
+          .slice(0, 10)
+      : currentCfg.channels;
+
+    try {
+      const meRes = await fetch(`https://api.telegram.org/bot${activeBotToken}/getMe`, {
+        signal: AbortSignal.timeout(6000),
+      });
+      const meData = (await meRes.json()) as {
+        ok?: boolean;
+        description?: string;
+        result?: { id?: number | string; username?: string };
+      };
+      if (!meData.ok || !meData.result?.id) {
+        res.json({
+          ok: false,
+          botConfigured: true,
+          botUsername: null,
+          error: redactBotToken(meData.description || 'Invalid Bot Token (getMe failed)'),
+        });
+        return;
+      }
+
+      const botId = String(meData.result.id);
+      const botUsername = meData.result.username || '';
+      const syncedResults = await Promise.all(
+        inputChannels.map((ch) => syncSingleChannelWithTelegramBot(ch, botId, activeBotToken)),
+      );
+      const syncedChannels = syncedResults.map((r) => r.channel);
+      const savedConfig = await saveChannelsConfigOnServer({
+        enabled: typeof body.enabled === 'boolean' ? body.enabled : currentCfg.enabled,
+        mustJoin:
+          typeof body.mustJoin === 'boolean' ? body.mustJoin : currentCfg.mustJoin === true,
+        channels: syncedChannels,
+        getCodeChannelUrl:
+          typeof body.getCodeChannelUrl === 'string'
+            ? body.getCodeChannelUrl
+            : currentCfg.getCodeChannelUrl,
+      });
+
+      recordServerLog(
+        'info',
+        'channels_sync',
+        `Live Bot channel sync by ${resolvedPlayerId} (@${botUsername || 'bot'}): ${syncedResults.filter((r) => r.botIsAdmin).length}/${syncedResults.length} bot-admin ready`,
+      );
+
+      res.json({
+        ok: true,
+        botConfigured: true,
+        botUsername,
+        channelsConfig: savedConfig,
+        results: syncedResults.map((r) => ({
+          id: r.channel.id,
+          handle: r.channel.handle,
+          chatId: r.channel.chatId || '',
+          title: r.channel.title,
+          memberCount: r.channel.memberCount ?? null,
+          botIsAdmin: r.botIsAdmin,
+          botStatus: r.botStatus,
+          error: r.error,
+        })),
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Telegram Bot sync failed';
+      res.status(502).json({ ok: false, botConfigured: true, error: redactBotToken(msg) });
+    }
   });
 
   const handleCheckChannelsRequest = async (req: express.Request, res: express.Response) => {
@@ -4311,7 +4986,7 @@ async function startServer() {
     const checks = await Promise.all(
       targetChannels.map(async (ch) => {
         try {
-          const tgData = await fetchTelegramChatMember(ch.handle, numericUserId!);
+          const tgData = await fetchTelegramChatMember(ch, numericUserId!);
 
           if (!tgData.ok || !tgData.result) {
             if (tgData.userNotFound) {
@@ -4431,7 +5106,7 @@ async function startServer() {
       res.status(429).json({ ok: false, error: `Too many requests. Retry in ${rl.retryAfterSec}s.` });
       return;
     }
-    const body = req.body as {
+    const body = (req.body || {}) as {
       initData?: string;
       token?: string;
       playerId?: string;
@@ -4444,29 +5119,72 @@ async function startServer() {
     }
     const actionUrl = String(body.actionUrl || '').trim();
     if (!actionUrl) {
-      res.json({ ok: true, enforced: false, joined: true, reason: 'not_applicable' });
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        status: 'unverifiable_channel',
+        reason: 'No Telegram channel link configured for verification.',
+      });
       return;
     }
-    // Skip bot start links & private invite links (t.me/bot?start=..., t.me/+...)
-    if (
-      /[?&]start(app)?=/i.test(actionUrl) ||
-      /t\.me\/(\+|joinchat\/)/i.test(actionUrl)
-    ) {
-      res.json({ ok: true, enforced: false, joined: true, reason: 'non_public_channel' });
+    if (/[?&]start(app)?=/i.test(actionUrl)) {
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        status: 'unverifiable_channel',
+        reason: 'Bot ?start= links cannot verify channel membership. Use a t.me/Channel link.',
+      });
       return;
     }
+
     const normalized = normalizeTelegramChannelHandle(actionUrl);
-    if (!normalized.handle) {
-      res.json({ ok: true, enforced: false, joined: true, reason: 'not_telegram_channel' });
+    let matchedChatId = '';
+    let matchedHandle = '';
+    if (/t\.me\/(\+|joinchat\/)/i.test(actionUrl)) {
+      const stripSlash = (u: string) => u.trim().replace(/\/+$/, '').toLowerCase();
+      const targetUrlA = stripSlash(actionUrl);
+      const targetUrlB = normalized.url ? stripSlash(normalized.url) : '';
+      const channelsCfg = await loadChannelsConfigFromFirestore();
+      const matched = channelsCfg.channels.find((c) => {
+        if (!c.url || !(c.chatId || c.handle)) return false;
+        const normCUrl = stripSlash(c.url);
+        return normCUrl === targetUrlA || (targetUrlB && normCUrl === targetUrlB);
+      });
+      if (!matched) {
+        res.json({
+          ok: true,
+          enforced: true,
+          joined: false,
+          status: 'unverifiable_channel',
+          reason: 'Private invite link must be synced in Admin Required Channels before claiming.',
+        });
+        return;
+      }
+      matchedChatId = matched.chatId || '';
+      matchedHandle = matched.handle;
+    }
+
+    const effectiveTaskHandle = normalized.handle || matchedHandle || matchedChatId;
+    if (!effectiveTaskHandle) {
+      res.json({
+        ok: true,
+        enforced: true,
+        joined: false,
+        status: 'unverifiable_channel',
+        reason: 'Could not resolve a Telegram channel handle from this task link.',
+      });
       return;
     }
+    const responseHandle = normalized.handle || matchedHandle || effectiveTaskHandle;
 
     if (!getTelegramBotToken()) {
       res.json({
         ok: true,
         enforced: true,
         joined: false,
-        handle: normalized.handle,
+        handle: responseHandle,
         status: 'bot_unconfigured',
         reason: 'Bot verification not configured on server',
       });
@@ -4486,7 +5204,7 @@ async function startServer() {
         ok: true,
         enforced: true,
         joined: false,
-        handle: normalized.handle,
+        handle: responseHandle,
         status: 'no_telegram_user',
         reason: 'Open inside Telegram to verify channel membership',
       });
@@ -4494,7 +5212,10 @@ async function startServer() {
     }
 
     try {
-      const tgData = await fetchTelegramChatMember(normalized.handle, numericUserId);
+      const tgData = await fetchTelegramChatMember(
+        { chatId: matchedChatId, handle: effectiveTaskHandle },
+        numericUserId,
+      );
       if (tgData.userNotFound) {
         recordChannelCheckDiagnosticLog({
           endpoint: 'check-task-channel',
@@ -4505,7 +5226,7 @@ async function startServer() {
           botConfigured: true,
           channels: [
             {
-              handle: normalized.handle,
+              handle: responseHandle,
               joined: false,
               status: 'left',
               rawTelegramOk: false,
@@ -4519,16 +5240,16 @@ async function startServer() {
           ok: true,
           enforced: true,
           joined: false,
-          handle: normalized.handle,
+          handle: responseHandle,
           status: 'left',
-          reason: 'Not joined yet',
+          reason: `Not joined ${responseHandle} yet — tap Join, then Retry.`,
         });
         return;
       }
       if (!tgData.ok || !tgData.result) {
         const friendlyErr = await formatTelegramChannelCheckError(
           tgData.description,
-          normalized.handle,
+          responseHandle,
         );
         recordChannelCheckDiagnosticLog({
           endpoint: 'check-task-channel',
@@ -4540,7 +5261,7 @@ async function startServer() {
           error: friendlyErr,
           channels: [
             {
-              handle: normalized.handle,
+              handle: responseHandle,
               joined: false,
               status: 'api_error',
               rawTelegramOk: false,
@@ -4554,7 +5275,7 @@ async function startServer() {
           ok: true,
           enforced: true,
           joined: false,
-          handle: normalized.handle,
+          handle: responseHandle,
           status: 'api_error',
           reason: friendlyErr,
         });
@@ -4571,7 +5292,7 @@ async function startServer() {
         botConfigured: true,
         channels: [
           {
-            handle: normalized.handle,
+            handle: responseHandle,
             joined,
             status,
             rawTelegramOk: true,
@@ -4586,16 +5307,16 @@ async function startServer() {
         ok: true,
         enforced: true,
         joined,
-        handle: normalized.handle,
+        handle: responseHandle,
         status,
-        ...(!joined ? { reason: `Not joined ${normalized.handle} yet — tap Join, then Retry.` } : {}),
+        ...(!joined ? { reason: `Not joined ${responseHandle} yet — tap Join, then Retry.` } : {}),
       });
     } catch {
       res.json({
         ok: true,
         enforced: true,
         joined: false,
-        handle: normalized.handle,
+        handle: responseHandle,
         status: 'network_error',
         reason: 'Network error checking channel join',
       });
@@ -4819,7 +5540,7 @@ async function startServer() {
       const results = await Promise.all(
         targetChannels.map(async (ch) => {
           try {
-            const botMember = await fetchTelegramChatMember(ch.handle, botId);
+            const botMember = await fetchTelegramChatMember(ch, botId);
             if (!botMember.ok || !botMember.result) {
               const errMsg = botMember.description || 'Could not inspect bot status in channel';
               diagLogChannels.push({
@@ -4849,7 +5570,7 @@ async function startServer() {
             let userRawOk: boolean | undefined;
             let userErrorCode: number | undefined;
             if (adminNumericId) {
-              const adminCheck = await fetchTelegramChatMember(ch.handle, adminNumericId);
+              const adminCheck = await fetchTelegramChatMember(ch, adminNumericId);
               if (adminCheck.userNotFound) {
                 userStatus = 'left';
                 userJoined = false;
@@ -4978,8 +5699,6 @@ async function startServer() {
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
     const resolvedPlayerId = resolveVerifiedAdminActor({
       req,
-      token: typeof req.query.token === 'string' ? req.query.token : undefined,
-      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
       extraAdminIds: effectiveExtraAdmins,
     });
     if (!resolvedPlayerId) {
@@ -5110,8 +5829,6 @@ async function startServer() {
 
   app.get('/api/admin/system-diagnostics', async (req, res) => {
     await handleSystemDiagnosticsRequest(req, res, {
-      token: typeof req.query.token === 'string' ? req.query.token : undefined,
-      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
       forceHeartbeat: req.query.forceHeartbeat === '1' || req.query.forceHeartbeat === 'true',
     });
   });
@@ -5147,8 +5864,6 @@ async function startServer() {
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
     const resolvedPlayerId = resolveVerifiedAdminActor({
       req,
-      token: typeof req.query.token === 'string' ? req.query.token : undefined,
-      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
       extraAdminIds: effectiveExtraAdmins,
     });
     if (!resolvedPlayerId) {
@@ -5264,8 +5979,8 @@ async function startServer() {
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
     const resolvedPlayerId = resolveVerifiedAdminActor({
       req,
-      token: body.token || (typeof req.query.token === 'string' ? req.query.token : undefined),
-      initData: body.initData || (typeof req.query.initData === 'string' ? req.query.initData : undefined),
+      token: body.token,
+      initData: body.initData,
       extraAdminIds: effectiveExtraAdmins,
     });
     if (!resolvedPlayerId) {
@@ -5340,12 +6055,12 @@ async function startServer() {
 
   app.post('/api/telegram/webhook', async (req, res) => {
     const expectedSecret = (process.env.TELEGRAM_WEBHOOK_SECRET || '').trim();
-    if (expectedSecret) {
-      const providedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '').trim();
-      if (providedSecret !== expectedSecret) {
-        res.status(401).json({ ok: false });
-        return;
-      }
+    const providedSecret = String(req.headers['x-telegram-bot-api-secret-token'] || '').trim();
+    const a = Buffer.from(providedSecret, 'utf8');
+    const b = Buffer.from(expectedSecret, 'utf8');
+    if (!expectedSecret || a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+      res.status(401).json({ ok: false, error: 'Webhook secret verification failed.' });
+      return;
     }
     try {
       const processed = await processTelegramUpdate(req.body as TelegramUpdatePayload);
@@ -5357,7 +6072,7 @@ async function startServer() {
         'warn',
         'telegram_webhook',
         'Telegram webhook handler error',
-        err instanceof Error ? err.message : 'Unknown error',
+        err instanceof Error ? redactBotToken(err.message) : 'Unknown error',
       );
     }
     res.json({ ok: true });
@@ -5480,7 +6195,6 @@ async function startServer() {
       return;
     }
 
-    const normalizedProvidedLen = normalizePasscodeInput(rawPasscode).length;
     const authResult = await verifyAdminPasscodeAsync(rawPasscode);
     console.info('[admin-auth] passcode_check', {
       ip,
@@ -5490,10 +6204,19 @@ async function startServer() {
       initDataValid,
       initDataReason,
       botTokenConfigured: Boolean(activeBotToken),
-      providedLen: normalizedProvidedLen,
-      expectedLen: DEFAULT_ADMIN_PASSCODE.length,
       matched: authResult.ok,
+      source: authResult.source,
     });
+    if (authResult.needsSetup) {
+      res.status(428).json({
+        ok: false,
+        requiresPasscode: true,
+        needsPasscodeSetup: true,
+        passcodeSource: 'unconfigured',
+        error: 'Initial Admin Passcode is not configured yet. Create a 6+ character passcode to claim the console.',
+      });
+      return;
+    }
     if (!authResult.ok) {
       checkRateLimit(failIpKey, 15, 15 * 60_000);
       checkRateLimit(failIdKey, 15, 15 * 60_000);
@@ -5525,10 +6248,107 @@ async function startServer() {
     });
   });
 
+  app.post('/api/admin/setup-passcode', async (req, res) => {
+    const ip = getClientIp(req);
+    const rl = checkRateLimit(`admin_setup_ip:${ip}`, 10, 15 * 60_000);
+    if (!rl.allowed) {
+      res.status(429).json({ ok: false, error: 'Too many setup attempts. Try again shortly.' });
+      return;
+    }
+
+    const body = (req.body || {}) as {
+      playerId?: string;
+      initData?: string;
+      passcode?: string;
+    };
+    const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
+    const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
+    const activeBotToken = getTelegramBotToken();
+    const rawInitData =
+      String(req.headers['x-telegram-init-data'] || '').trim() ||
+      String(body.initData || '').trim();
+    let resolvedPlayerId = String(body.playerId || '').trim();
+
+    if (activeBotToken && !rawInitData) {
+      res.status(401).json({
+        ok: false,
+        error: 'Open inside Telegram Mini App as an authorized Admin to claim the initial passcode.',
+      });
+      return;
+    }
+    if (rawInitData) {
+      const verified = verifyTelegramInitData(rawInitData, activeBotToken, { allowClockSkew: true });
+      if (!verified.valid || !verified.playerId) {
+        res.status(401).json({ ok: false, error: 'Invalid or expired Telegram session signature.' });
+        return;
+      }
+      resolvedPlayerId = verified.playerId;
+    }
+
+    if (!isValidSafeId(resolvedPlayerId) || !isAdminPlayerId(resolvedPlayerId, effectiveExtraAdmins)) {
+      res.status(403).json({ ok: false, error: 'Restricted to authorized Admin IDs.' });
+      return;
+    }
+
+    const security = await loadActiveAdminSecurity();
+    if (security.source !== 'unconfigured') {
+      res.status(409).json({
+        ok: false,
+        error: 'Admin Passcode is already configured. Unlock with the existing passcode.',
+      });
+      return;
+    }
+
+    const cleanPasscode = normalizePasscodeInput(String(body.passcode || ''));
+    if (cleanPasscode.length < 6 || cleanPasscode.length > 64) {
+      res.status(400).json({
+        ok: false,
+        error: 'Initial Admin Passcode must be between 6 and 64 characters.',
+      });
+      return;
+    }
+
+    const { salt, hash } = hashPasscodeScrypt(cleanPasscode);
+    const updatedAtMs = Date.now();
+    inMemoryClaimedAdminPasscode = {
+      salt,
+      hash,
+      claimedBy: resolvedPlayerId,
+      updatedAtMs,
+    };
+    try {
+      const dir = path.dirname(ADMIN_SECURITY_FILE);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(
+        ADMIN_SECURITY_FILE,
+        JSON.stringify(inMemoryClaimedAdminPasscode, null, 2),
+        { encoding: 'utf8', mode: 0o600 },
+      );
+    } catch {
+      // Fall back to in-memory vault if disk write fails
+    }
+
+    recordServerLog('info', 'admin_auth', `Initial Admin Passcode claimed by ${resolvedPlayerId}`, 'source=server_file');
+    const token = signSessionToken({
+      role: 'admin',
+      playerId: resolvedPlayerId,
+      method: 'passcode',
+    });
+    res.json({
+      ok: true,
+      method: 'passcode',
+      token,
+      passcodeSource: 'server_file',
+      passcodeUpdatedAtMs: updatedAtMs,
+    });
+  });
+
   app.post('/api/admin/change-passcode', async (_req, res) => {
     res.status(403).json({
       ok: false,
-      error: 'Admin passcode is locked in server.ts and cannot be changed from the Admin Panel.',
+      error: 'Admin passcode is managed via server environment configuration and cannot be changed from the Admin Panel.',
     });
   });
 
@@ -5565,8 +6385,6 @@ async function startServer() {
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
     const resolvedPlayerId = resolveVerifiedAdminActor({
       req,
-      token: typeof req.query.token === 'string' ? req.query.token : undefined,
-      initData: typeof req.query.initData === 'string' ? req.query.initData : undefined,
       extraAdminIds: effectiveExtraAdmins,
     });
     if (!resolvedPlayerId) {
@@ -5738,6 +6556,15 @@ async function startServer() {
     res.json({ ok: true, registered: true, enabled: next.enabled });
   });
 
+  const isTelegramTargetUid = (uid: string): boolean =>
+    uid.startsWith('tg_') || /^\d{4,20}$/.test(uid);
+
+  const canonicalizeActorUid = (uid: string): string => {
+    const clean = String(uid || '').trim();
+    if (/^\d{4,20}$/.test(clean)) return `tg_${clean}`;
+    return clean;
+  };
+
   app.post('/api/referrals', async (req, res) => {
     const ip = getClientIp(req);
     const rl = checkRateLimit(`ref_direct:${ip}`, 40, 60_000);
@@ -5745,17 +6572,35 @@ async function startServer() {
       res.status(429).json({ error: 'Too many requests.' });
       return;
     }
-    const { userId, referrerId, displayName, handle, photoUrl } = (req.body || {}) as {
+    const { userId, referrerId, displayName, handle, photoUrl, initData, token } = (req.body || {}) as {
       userId?: string;
       referrerId?: string;
       displayName?: string;
       handle?: string;
       photoUrl?: string;
+      initData?: string;
+      token?: string;
     };
     const cleanUserId = String(userId || '').trim();
     const cleanReferrerId = String(referrerId || '').trim();
     if (!cleanUserId || !cleanReferrerId) {
       res.status(400).json({ error: 'Missing userId or referrerId' });
+      return;
+    }
+
+    const activeBotToken = getTelegramBotToken();
+    const verifiedActor = resolveVerifiedPlayerActor({ req, token, initData });
+    const targetCanonical = canonicalizeActorUid(cleanUserId);
+    if (verifiedActor) {
+      if (verifiedActor !== targetCanonical) {
+        res.status(403).json({ error: 'Actor mismatch for referral link.' });
+        return;
+      }
+    } else if (
+      (activeBotToken && isTelegramTargetUid(cleanUserId)) ||
+      Boolean(String(initData || token || '').trim())
+    ) {
+      res.status(401).json({ error: 'Verified Telegram session required.' });
       return;
     }
 
@@ -5771,7 +6616,7 @@ async function startServer() {
     // Best-effort sync with Firestore reward ledger & Bot DM notification
     let applyResult: Awaited<ReturnType<typeof applyReferralInServerDb>> | null = null;
     if (isValidSafeId(cleanUserId)) {
-      const targetUid = /^\d{4,20}$/.test(cleanUserId) ? `tg_${cleanUserId}` : cleanUserId;
+      const targetUid = targetCanonical;
       applyResult = await applyReferralInServerDb({
         referredUid: targetUid,
         refCode: cleanReferrerId,
@@ -5800,6 +6645,22 @@ async function startServer() {
     const userId = String(req.query.userId || '').trim();
     if (!userId) {
       res.status(400).json({ error: 'Missing userId' });
+      return;
+    }
+    const activeBotToken = getTelegramBotToken();
+    const verifiedActor = resolveVerifiedPlayerActor({
+      req,
+      initData: typeof req.headers['x-telegram-init-data'] === 'string'
+        ? req.headers['x-telegram-init-data']
+        : undefined,
+    });
+    const canonicalTarget = canonicalizeActorUid(userId);
+    if (verifiedActor && verifiedActor !== canonicalTarget) {
+      res.status(403).json({ error: 'Forbidden' });
+      return;
+    }
+    if (!verifiedActor && activeBotToken && isTelegramTargetUid(userId)) {
+      res.status(401).json({ error: 'Verified session required' });
       return;
     }
     const merged = getMergedReferralsForUser(userId);
@@ -5905,7 +6766,7 @@ async function startServer() {
         status: result.activated ? 'verified' : 'pending',
         bonusAwarded: result.coinsRewarded ?? 0,
         coinsRewarded: result.coinsRewarded ?? 0,
-        referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
+        referredBonusCoins: result.referredBonusCoins ?? 0,
         nextReferredCoins: result.nextReferredCoins,
         referrerUid: result.referrerUid,
         referrerName: result.referrerName,
@@ -5990,13 +6851,14 @@ async function startServer() {
           if (!refUid) continue;
           const createdAtMs = Math.max(0, Number(d.createdAtMs ?? 0) || Date.now());
           const numId = extractTelegramNumericUserId(refUid);
+          const defaultBonus = getFastPerReferRewardCoins();
           fsReferrals.set(numId || refUid, {
             id: numId || refUid,
             uid: refUid,
             name: String(d.referredName || 'Farmer'),
             handle: String(d.referredHandle || '@farmer'),
-            bonus: Number(d.coinsEarned ?? BONUS_PER_REFERRAL),
-            coinsEarned: Number(d.coinsEarned ?? BONUS_PER_REFERRAL),
+            bonus: Number(d.coinsEarned ?? defaultBonus),
+            coinsEarned: Number(d.coinsEarned ?? defaultBonus),
             status: String(d.status || 'active'),
             toppedUpUsd: Number(d.toppedUpUsd ?? 0),
             date: new Date(createdAtMs).toISOString(),
@@ -6076,6 +6938,19 @@ async function startServer() {
       initData: body.initData,
     });
     const rawPlayerId = String(body.playerId || '').trim();
+    const activeBotToken = getTelegramBotToken();
+    if (verifiedActor && rawPlayerId && canonicalizeActorUid(rawPlayerId) !== verifiedActor) {
+      res.status(403).json({ ok: false, applied: false, error: 'Actor mismatch.' });
+      return;
+    }
+    if (
+      !verifiedActor &&
+      ((activeBotToken && isTelegramTargetUid(rawPlayerId)) ||
+        Boolean(String(body.initData || body.token || '').trim()))
+    ) {
+      res.status(401).json({ ok: false, applied: false, error: 'Verified Telegram session required.' });
+      return;
+    }
     const referredUid = verifiedActor || rawPlayerId;
 
     const result = await applyReferralInServerDb({
@@ -6139,6 +7014,19 @@ async function startServer() {
       initData: body.initData,
     });
     const rawPlayerId = String(body.playerId || '').trim();
+    const activeBotToken = getTelegramBotToken();
+    if (verifiedActor && rawPlayerId && canonicalizeActorUid(rawPlayerId) !== verifiedActor) {
+      res.status(403).json({ ok: false, applied: false, error: 'Actor mismatch.' });
+      return;
+    }
+    if (
+      !verifiedActor &&
+      ((activeBotToken && isTelegramTargetUid(rawPlayerId)) ||
+        Boolean(String(body.initData || body.token || '').trim()))
+    ) {
+      res.status(401).json({ ok: false, applied: false, error: 'Verified Telegram session required.' });
+      return;
+    }
     const targetUid = verifiedActor || (isValidSafeId(rawPlayerId) ? rawPlayerId : '');
     const numericId = extractTelegramNumericUserId(targetUid);
     if (!numericId) {
@@ -6180,7 +7068,7 @@ async function startServer() {
           referrerUid: result.referrerUid,
           referrerName: result.referrerName,
           coinsRewarded: result.coinsRewarded ?? 0,
-          referredBonusCoins: result.referredBonusCoins ?? REFERRED_WELCOME_BONUS_COINS,
+          referredBonusCoins: result.referredBonusCoins ?? 0,
           nextReferredCoins: result.nextReferredCoins,
           botDmSent: result.botDmSent,
           botDmEvent: result.botDmEvent,
@@ -6241,6 +7129,19 @@ async function startServer() {
       initData: body.initData,
     });
     const rawReferredUid = String(body.referredUid || '').trim();
+    const activeBotToken = getTelegramBotToken();
+    if (verifiedActor && rawReferredUid && canonicalizeActorUid(rawReferredUid) !== verifiedActor) {
+      res.status(403).json({ ok: false, error: 'Actor mismatch.' });
+      return;
+    }
+    if (
+      !verifiedActor &&
+      ((activeBotToken && isTelegramTargetUid(rawReferredUid)) ||
+        Boolean(String(body.initData || body.token || '').trim()))
+    ) {
+      res.status(401).json({ ok: false, error: 'Verified Telegram session required.' });
+      return;
+    }
     const targetUid = verifiedActor || (isValidSafeId(rawReferredUid) ? rawReferredUid : '');
     if (!targetUid) {
       res.status(400).json({ ok: false, error: 'Valid referredUid required' });
@@ -6288,13 +7189,14 @@ async function startServer() {
         : body.event === 'referral_pending'
           ? 'referral_pending'
           : 'referral_joined';
+    const economyCfg = await loadEconomyConfig();
     const customBonus = Math.round(Number(body.rewardCoins ?? 0));
     const rewardCoins =
       event === 'deposit_commission'
         ? Math.min(100_000, Math.max(0, customBonus))
         : isAdminSignupBonus && Number.isFinite(customBonus) && customBonus > 0
           ? Math.min(100_000, customBonus)
-          : REFERRER_SIGNUP_BONUS_COINS;
+          : economyCfg.perReferRewardCoins;
 
     if (!isValidSafeId(referrerUid) || !numericReferrerId) {
       res.json({
@@ -6379,6 +7281,7 @@ async function startServer() {
       referredName: body.referredName,
       referredHandle: body.referredHandle,
       rewardCoins,
+      perReferRewardCoins: economyCfg.perReferRewardCoins,
       depositGram: body.depositGram,
       depositUsd: body.depositUsd,
       totalReferrals: referrerTotalReferrals,
@@ -6830,10 +7733,10 @@ async function startServer() {
         chat_id: TELEGRAM_PAYOUT_CHANNEL,
         text: chRendered.htmlText,
         parse_mode: 'HTML',
-        ...(chRendered.buttonText && /^https:\/\//i.test(chRendered.buttonUrl)
+        ...(chRendered.inlineButtons.length > 0
           ? {
               reply_markup: {
-                inline_keyboard: [[{ text: chRendered.buttonText, url: chRendered.buttonUrl }]],
+                inline_keyboard: chRendered.inlineButtons,
               },
             }
           : {}),
@@ -7064,8 +7967,10 @@ async function startServer() {
     }
 
     const nowMs = Date.now();
-    const deadlineMs = nowMs + 15_000;
+    const deadlineMs = nowMs + 16_000;
     const isTimedOut = () => Date.now() >= deadlineMs;
+    const remainingBudgetMs = (capMs: number) =>
+      Math.max(0, Math.min(capMs, deadlineMs - Date.now()));
     const resetTokens = encodeAchievementsWithAds([], 0, { resetEpochMs: nowMs });
     let playersResetCount = 0;
     let referralsDeletedCount = 0;
@@ -7095,44 +8000,65 @@ async function startServer() {
 
     try {
       if (serverDb) {
-        const runConcurrent = async <T>(
+        const dbRef = serverDb;
+        const commitChunkedOps = async <T>(
           items: readonly T[],
-          concurrency: number,
-          worker: (item: T) => Promise<void>,
-        ): Promise<void> => {
-          for (let i = 0; i < items.length; i += concurrency) {
+          chunkSize: number,
+          applyOp: (batch: ReturnType<typeof writeBatch>, item: T) => void,
+          fallbackOp: (item: T) => Promise<void>,
+        ): Promise<number> => {
+          let succeeded = 0;
+          for (let i = 0; i < items.length; i += chunkSize) {
             if (isTimedOut()) break;
-            await Promise.allSettled(items.slice(i, i + concurrency).map((item) => worker(item)));
+            const slice = items.slice(i, i + chunkSize);
+            try {
+              const batch = writeBatch(dbRef);
+              for (const item of slice) {
+                applyOp(batch, item);
+              }
+              const commitTimeout = Math.max(2_500, remainingBudgetMs(6_000));
+              await withResetStepTimeout(batch.commit(), commitTimeout, 'Committing reset batch');
+              succeeded += slice.length;
+            } catch {
+              if (isTimedOut()) break;
+              const fallbackTimeout = Math.max(1_500, remainingBudgetMs(3_500));
+              const settled = await Promise.allSettled(
+                slice.map((item) =>
+                  withResetStepTimeout(fallbackOp(item), fallbackTimeout, 'Fallback reset op'),
+                ),
+              );
+              succeeded += settled.filter((r) => r.status === 'fulfilled').length;
+            }
           }
+          return succeeded;
         };
 
         const deleteCollectionPaged = async (colName: string, pageSize: number): Promise<number> => {
           let removed = 0;
           let lastCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-          for (let page = 0; page < 50; page++) {
-            if (isTimedOut()) break;
+          for (let page = 0; page < 40; page++) {
+            const budget = remainingBudgetMs(5_000);
+            if (budget < 350) break;
             const colQ: Query<DocumentData> = lastCursor
               ? query(
-                  collection(serverDb!, colName),
+                  collection(dbRef, colName),
                   orderBy('__name__'),
                   startAfter(lastCursor),
                   limit(pageSize),
                 )
-              : query(collection(serverDb!, colName), orderBy('__name__'), limit(pageSize));
-            const snap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+              : query(collection(dbRef, colName), orderBy('__name__'), limit(pageSize));
+            const snap: QuerySnapshot<DocumentData> | null = await withResetStepTimeout(
               getDocs(colQ),
-              6_000,
+              budget,
               `Reading ${colName}`,
+            ).catch(() => null);
+            if (!snap || snap.empty) break;
+            removed += await commitChunkedOps(
+              snap.docs,
+              400,
+              (b, d) => b.delete(d.ref),
+              (d) => deleteDoc(d.ref),
             );
-            if (snap.empty) break;
-            await runConcurrent(snap.docs, 20, async (d) => {
-              try {
-                await deleteDoc(d.ref);
-                removed += 1;
-              } catch {
-                // Best-effort skip on individual doc error
-              }
-            });
             lastCursor = snap.docs[snap.docs.length - 1];
             if (snap.size < pageSize) break;
           }
@@ -7148,62 +8074,60 @@ async function startServer() {
         promosDeletedCount = delPromos;
         bansDeletedCount = delBans;
 
-        // Reject any pending withdraw_requests (rules forbid deletion on withdraw_requests)
-        let lastWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-        for (let page = 0; page < 50; page++) {
-          if (isTimedOut()) break;
-          const wdQ: Query<DocumentData> = lastWdCursor
-            ? query(
-                collection(serverDb, 'withdraw_requests'),
-                orderBy('__name__'),
-                startAfter(lastWdCursor),
-                limit(100),
-              )
-            : query(collection(serverDb, 'withdraw_requests'), orderBy('__name__'), limit(100));
-          const wdSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
-            getDocs(wdQ),
-            6_000,
-            'Reading withdraw_requests',
+        // Close pending withdraw_requests directly with indexed status query
+        const pendingWdUids = new Set<string>();
+        for (let page = 0; page < 20; page++) {
+          const budget = remainingBudgetMs(5_000);
+          if (budget < 350) break;
+          const wdSnap: QuerySnapshot<DocumentData> | null = await withResetStepTimeout(
+            getDocs(
+              query(collection(dbRef, 'withdraw_requests'), where('status', '==', 'pending'), limit(100)),
+            ),
+            budget,
+            'Reading pending withdraw_requests',
+          ).catch(() => null);
+          if (!wdSnap || wdSnap.empty) break;
+          for (const d of wdSnap.docs) {
+            const uidVal = String(d.data()?.userId || '').trim();
+            if (uidVal) pendingWdUids.add(uidVal);
+          }
+          const wdPatch = {
+            status: 'rejected',
+            adminNote: 'System reset by Admin',
+            reviewedAtMs: nowMs,
+            updatedAt: serverTimestamp(),
+          };
+          const closed = await commitChunkedOps(
+            wdSnap.docs,
+            200,
+            (b, d) => b.update(d.ref, wdPatch),
+            (d) => updateDoc(d.ref, wdPatch),
           );
-          if (wdSnap.empty) break;
-          const pendingDocs = wdSnap.docs.filter(
-            (d) => String(d.data()?.status || '') === 'pending',
-          );
-          await runConcurrent(pendingDocs, 20, async (d) => {
-            try {
-              await updateDoc(d.ref, {
-                status: 'rejected',
-                adminNote: 'System reset by Admin',
-                reviewedAtMs: nowMs,
-                updatedAt: serverTimestamp(),
-              });
-              withdrawalsRejectedCount += 1;
-            } catch {
-              // Best-effort
-            }
-          });
-          lastWdCursor = wdSnap.docs[wdSnap.docs.length - 1];
-          if (wdSnap.size < 100) break;
+          withdrawalsRejectedCount += closed;
+          if (wdSnap.size < 100 || closed === 0) break;
         }
 
-        // Reset every player document & clean subcollections concurrently (preserve __admin_vault__)
+        // Batch reset all player profiles cleanly and target subcollection cleanup only to active accounts
+        const playersNeedingRefClean: string[] = [];
+        const playersNeedingWdClean: string[] = [];
         let lastPlayerCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 100; page++) {
-          if (isTimedOut()) break;
+          const budget = remainingBudgetMs(5_000);
+          if (budget < 350) break;
           const pQ: Query<DocumentData> = lastPlayerCursor
             ? query(
-                collection(serverDb, 'players'),
+                collection(dbRef, 'players'),
                 orderBy('__name__'),
                 startAfter(lastPlayerCursor),
                 limit(50),
               )
-            : query(collection(serverDb, 'players'), orderBy('__name__'), limit(50));
-          const pSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+            : query(collection(dbRef, 'players'), orderBy('__name__'), limit(50));
+          const pSnap: QuerySnapshot<DocumentData> | null = await withResetStepTimeout(
             getDocs(pQ),
-            6_000,
+            budget,
             'Reading players',
-          );
-          if (pSnap.empty) break;
+          ).catch(() => null);
+          if (!pSnap || pSnap.empty) break;
 
           const playerDocs = pSnap.docs.filter(
             (d) =>
@@ -7213,115 +8137,22 @@ async function startServer() {
               !d.id.startsWith('__') &&
               !d.id.startsWith('sys_'),
           );
-          await runConcurrent(playerDocs, 10, async (d) => {
-            const cleanReferrals = async () => {
-              let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-              for (let rPage = 0; rPage < 40; rPage++) {
-                if (isTimedOut()) break;
-                const rQ: Query<DocumentData> = lastRefCursor
-                  ? query(
-                      collection(serverDb!, 'players', d.id, 'referrals'),
-                      orderBy('__name__'),
-                      startAfter(lastRefCursor),
-                      limit(50),
-                    )
-                  : query(
-                      collection(serverDb!, 'players', d.id, 'referrals'),
-                      orderBy('__name__'),
-                      limit(50),
-                    );
-                const refSnap: QuerySnapshot<DocumentData> = await getDocs(rQ);
-                if (refSnap.empty) break;
-                await runConcurrent(refSnap.docs, 15, async (rDoc) => {
-                  try {
-                    await deleteDoc(rDoc.ref);
-                    referralsDeletedCount += 1;
-                  } catch {
-                    // Best-effort
-                  }
-                });
-                lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
-                if (refSnap.size < 50) break;
-              }
-            };
 
-            const rejectPendingWithdrawals = async () => {
-              let lastUserWdCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-              for (let wPage = 0; wPage < 20; wPage++) {
-                if (isTimedOut()) break;
-                const uWdQ: Query<DocumentData> = lastUserWdCursor
-                  ? query(
-                      collection(serverDb!, 'players', d.id, 'withdrawals'),
-                      orderBy('__name__'),
-                      startAfter(lastUserWdCursor),
-                      limit(40),
-                    )
-                  : query(
-                      collection(serverDb!, 'players', d.id, 'withdrawals'),
-                      orderBy('__name__'),
-                      limit(40),
-                    );
-                const uWdSnap: QuerySnapshot<DocumentData> = await getDocs(uWdQ);
-                if (uWdSnap.empty) break;
-                const pendingWds = uWdSnap.docs.filter((wDoc) => {
-                  const st = String(wDoc.data()?.status || '');
-                  return st === 'pending' || st === 'processing';
-                });
-                await runConcurrent(pendingWds, 10, async (wDoc) => {
-                  try {
-                    await updateDoc(wDoc.ref, {
-                      status: 'rejected',
-                      adminNote: 'System reset by Admin',
-                      reviewedAtMs: nowMs,
-                    });
-                  } catch {
-                    // Best-effort
-                  }
-                });
-                lastUserWdCursor = uWdSnap.docs[uWdSnap.docs.length - 1];
-                if (uWdSnap.size < 40) break;
-              }
-            };
+          for (const d of playerDocs) {
+            const pd = d.data();
+            if (
+              Number(pd.referralCount ?? 0) > 0 ||
+              Boolean(pd.referredBy) ||
+              Number(pd.referralCoinsEarned ?? 0) > 0
+            ) {
+              playersNeedingRefClean.push(d.id);
+            }
+            if (pendingWdUids.has(d.id) || Number(pd.totalWithdrawnUsd ?? 0) > 0) {
+              playersNeedingWdClean.push(d.id);
+            }
+          }
 
-            const rejectPendingTransactions = async () => {
-              let lastUserTxCursor: QueryDocumentSnapshot<DocumentData> | null = null;
-              for (let tPage = 0; tPage < 20; tPage++) {
-                if (isTimedOut()) break;
-                const uTxQ: Query<DocumentData> = lastUserTxCursor
-                  ? query(
-                      collection(serverDb!, 'players', d.id, 'transactions'),
-                      orderBy('__name__'),
-                      startAfter(lastUserTxCursor),
-                      limit(60),
-                    )
-                  : query(
-                      collection(serverDb!, 'players', d.id, 'transactions'),
-                      orderBy('__name__'),
-                      limit(60),
-                    );
-                const uTxSnap: QuerySnapshot<DocumentData> = await getDocs(uTxQ);
-                if (uTxSnap.empty) break;
-                const pendingTxs = uTxSnap.docs.filter(
-                  (tDoc) => String(tDoc.data()?.status || '') === 'pending',
-                );
-                await runConcurrent(pendingTxs, 15, async (tDoc) => {
-                  try {
-                    await updateDoc(tDoc.ref, { status: 'rejected' });
-                  } catch {
-                    // Best-effort
-                  }
-                });
-                lastUserTxCursor = uTxSnap.docs[uTxSnap.docs.length - 1];
-                if (uTxSnap.size < 60) break;
-              }
-            };
-
-            await Promise.all([
-              cleanReferrals(),
-              rejectPendingWithdrawals(),
-              rejectPendingTransactions(),
-            ]);
-
+          const buildPlayerResetPayload = (d: QueryDocumentSnapshot<DocumentData>) => {
             const pd = d.data();
             const safeName = String(pd.displayName || '').trim().slice(0, 60) || 'Farmer';
             const safeHandle = formatReferralHandle(String(pd.handle || ''), d.id).slice(0, 40) || '@farmer';
@@ -7329,74 +8160,76 @@ async function startServer() {
             const safeColor = rawColor.length >= 4 ? rawColor : '#EF4444';
             const rawLang = String(pd.language || 'en').trim().slice(0, 16);
             const safeLang = rawLang.length >= 2 ? rawLang : 'en';
+            return {
+              displayName: safeName,
+              handle: safeHandle,
+              photoUrl: String(pd.photoUrl || '').slice(0, 512),
+              avatarColor: safeColor,
+              language: safeLang,
+              level: 1,
+              xp: 0,
+              coins: SIGNUP_BONUS_COINS,
+              eggs: 0,
+              totalEggsCollected: 0,
+              totalCashEarnedUsd: 0,
+              totalWithdrawnUsd: 0,
+              basketCapacity: 300,
+              basketTierHours: 8,
+              leghornCount: 0,
+              rhodeCount: 0,
+              orpingtonCount: 0,
+              australorpCount: 0,
+              boughtThisWeek: 0,
+              dailyStreak: 0,
+              lastDailyClaimDate: '',
+              completedTaskIds: [],
+              claimedPromoCodes: [],
+              watchedAdsCount: 0,
+              totalAdsWatched: 0,
+              referredBy: '',
+              referralActivated: false,
+              referralCount: 0,
+              referralCoinsEarned: 0,
+              firstDepositBonusUsed: false,
+              lastCollectedAt: nowMs,
+              feedBoostUntilMs: 0,
+              lastGoldenEggAtMs: 0,
+              goldenEggsFound: 0,
+              claimedAchievementIds: resetTokens,
+              claimedReferralMilestones: [],
+              updatedAt: serverTimestamp(),
+            };
+          };
 
-            try {
-              await updateDoc(d.ref, {
-                displayName: safeName,
-                handle: safeHandle,
-                photoUrl: String(pd.photoUrl || '').slice(0, 512),
-                avatarColor: safeColor,
-                language: safeLang,
-                level: 1,
-                xp: 0,
-                coins: SIGNUP_BONUS_COINS,
-                eggs: 0,
-                totalEggsCollected: 0,
-                totalCashEarnedUsd: 0,
-                totalWithdrawnUsd: 0,
-                basketCapacity: 300,
-                basketTierHours: 8,
-                leghornCount: 0,
-                rhodeCount: 0,
-                orpingtonCount: 0,
-                australorpCount: 0,
-                boughtThisWeek: 0,
-                dailyStreak: 0,
-                lastDailyClaimDate: '',
-                completedTaskIds: [],
-                claimedPromoCodes: [],
-                watchedAdsCount: 0,
-                totalAdsWatched: 0,
-                referredBy: '',
-                referralActivated: false,
-                referralCount: 0,
-                referralCoinsEarned: 0,
-                firstDepositBonusUsed: false,
-                lastCollectedAt: nowMs,
-                feedBoostUntilMs: 0,
-                lastGoldenEggAtMs: 0,
-                goldenEggsFound: 0,
-                claimedAchievementIds: resetTokens,
-                claimedReferralMilestones: [],
-                updatedAt: serverTimestamp(),
-              });
-              playersResetCount += 1;
-            } catch {
-              // Best-effort on individual malformed legacy doc
-            }
-          });
+          playersResetCount += await commitChunkedOps(
+            playerDocs,
+            50,
+            (b, d) => b.update(d.ref, buildPlayerResetPayload(d)),
+            (d) => updateDoc(d.ref, buildPlayerResetPayload(d)),
+          );
           lastPlayerCursor = pSnap.docs[pSnap.docs.length - 1];
           if (pSnap.size < 50) break;
         }
 
-        // Reset leaderboard stats
+        // Batch reset leaderboard stats
         let lastLbCursor: QueryDocumentSnapshot<DocumentData> | null = null;
         for (let page = 0; page < 100; page++) {
-          if (isTimedOut()) break;
+          const budget = remainingBudgetMs(4_500);
+          if (budget < 350) break;
           const lbQ: Query<DocumentData> = lastLbCursor
             ? query(
-                collection(serverDb, 'leaderboard'),
+                collection(dbRef, 'leaderboard'),
                 orderBy('__name__'),
                 startAfter(lastLbCursor),
                 limit(50),
               )
-            : query(collection(serverDb, 'leaderboard'), orderBy('__name__'), limit(50));
-          const lbSnap: QuerySnapshot<DocumentData> = await withResetStepTimeout(
+            : query(collection(dbRef, 'leaderboard'), orderBy('__name__'), limit(50));
+          const lbSnap: QuerySnapshot<DocumentData> | null = await withResetStepTimeout(
             getDocs(lbQ),
-            5_000,
+            budget,
             'Reading leaderboard',
-          );
-          if (lbSnap.empty) break;
+          ).catch(() => null);
+          if (!lbSnap || lbSnap.empty) break;
           const lbDocs = lbSnap.docs.filter(
             (d) =>
               d.id !== ADMIN_PASSCODE_VAULT_UID &&
@@ -7405,22 +8238,98 @@ async function startServer() {
               !d.id.startsWith('__') &&
               !d.id.startsWith('sys_'),
           );
-          await runConcurrent(lbDocs, 20, async (d) => {
-            try {
-              await updateDoc(d.ref, {
-                buyerPoints: 0,
-                inviterCount: 0,
-                eggs: 0,
-                totalEggsCollected: 0,
-                chickensCount: 0,
-                updatedAt: serverTimestamp(),
-              });
-            } catch {
-              // Best-effort
-            }
-          });
+          const lbResetPayload = {
+            buyerPoints: 0,
+            inviterCount: 0,
+            eggs: 0,
+            totalEggsCollected: 0,
+            chickensCount: 0,
+            updatedAt: serverTimestamp(),
+          };
+          await commitChunkedOps(
+            lbDocs,
+            50,
+            (b, d) => b.update(d.ref, lbResetPayload),
+            (d) => updateDoc(d.ref, lbResetPayload),
+          );
           lastLbCursor = lbSnap.docs[lbSnap.docs.length - 1];
           if (lbSnap.size < 50) break;
+        }
+
+        // Targeted subcollection cleanup for players with referrals / pending withdrawals
+        const cleanPlayerSubcollections = async (uid: string) => {
+          if (isTimedOut()) return;
+          if (playersNeedingRefClean.includes(uid)) {
+            let lastRefCursor: QueryDocumentSnapshot<DocumentData> | null = null;
+            for (let rPage = 0; rPage < 20; rPage++) {
+              if (isTimedOut()) break;
+              const rQ: Query<DocumentData> = lastRefCursor
+                ? query(
+                    collection(dbRef, 'players', uid, 'referrals'),
+                    orderBy('__name__'),
+                    startAfter(lastRefCursor),
+                    limit(50),
+                  )
+                : query(collection(dbRef, 'players', uid, 'referrals'), orderBy('__name__'), limit(50));
+              const refSnap = await getDocs(rQ).catch(() => null);
+              if (!refSnap || refSnap.empty) break;
+              referralsDeletedCount += await commitChunkedOps(
+                refSnap.docs,
+                50,
+                (b, rDoc) => b.delete(rDoc.ref),
+                (rDoc) => deleteDoc(rDoc.ref),
+              );
+              lastRefCursor = refSnap.docs[refSnap.docs.length - 1];
+              if (refSnap.size < 50) break;
+            }
+          }
+          if (playersNeedingWdClean.includes(uid)) {
+            const uWdSnap = await getDocs(
+              query(
+                collection(dbRef, 'players', uid, 'withdrawals'),
+                where('status', 'in', ['pending', 'processing']),
+                limit(40),
+              ),
+            ).catch(() => null);
+            if (uWdSnap && !uWdSnap.empty) {
+              const patch = {
+                status: 'rejected',
+                adminNote: 'System reset by Admin',
+                reviewedAtMs: nowMs,
+              };
+              await commitChunkedOps(
+                uWdSnap.docs,
+                40,
+                (b, wDoc) => b.update(wDoc.ref, patch),
+                (wDoc) => updateDoc(wDoc.ref, patch),
+              );
+            }
+          }
+          if (pendingWdUids.has(uid)) {
+            const uTxSnap = await getDocs(
+              query(
+                collection(dbRef, 'players', uid, 'transactions'),
+                where('status', '==', 'pending'),
+                limit(60),
+              ),
+            ).catch(() => null);
+            if (uTxSnap && !uTxSnap.empty) {
+              await commitChunkedOps(
+                uTxSnap.docs,
+                60,
+                (b, tDoc) => b.update(tDoc.ref, { status: 'rejected' }),
+                (tDoc) => updateDoc(tDoc.ref, { status: 'rejected' }),
+              );
+            }
+          }
+        };
+
+        const uniqueSubUids = Array.from(
+          new Set([...playersNeedingRefClean, ...playersNeedingWdClean, ...pendingWdUids]),
+        );
+        for (let i = 0; i < uniqueSubUids.length; i += 10) {
+          if (isTimedOut()) break;
+          await Promise.allSettled(uniqueSubUids.slice(i, i + 10).map((u) => cleanPlayerSubcollections(u)));
         }
 
         // Reset season back to Season 1 & bump app_config/system_reset + mirror doc epoch
@@ -7428,8 +8337,8 @@ async function startServer() {
         try {
           const [resetSnap, mirrorSnap] = await withResetStepTimeout(
             Promise.all([
-              getFreshDoc(doc(serverDb, 'app_config', 'system_reset')).catch(() => null),
-              getFreshDoc(doc(serverDb, 'players', SYSTEM_RESET_PROFILE_DOC_ID)).catch(() => null),
+              getFreshDoc(doc(dbRef, 'app_config', 'system_reset')).catch(() => null),
+              getFreshDoc(doc(dbRef, 'players', SYSTEM_RESET_PROFILE_DOC_ID)).catch(() => null),
             ]),
             4_000,
             'Reading reset epoch',
@@ -7447,7 +8356,7 @@ async function startServer() {
         const nextResetCount = prevCount + 1;
         await withResetStepTimeout(
           Promise.allSettled([
-            setDoc(doc(serverDb, 'app_config', 'season'), {
+            setDoc(doc(dbRef, 'app_config', 'season'), {
               seasonNumber: 1,
               title: 'Harvest Cup Season 1',
               prizePoolCoins: 25000,
@@ -7456,7 +8365,7 @@ async function startServer() {
               updatedAtMs: nowMs,
               updatedAt: serverTimestamp(),
             }),
-            setDoc(doc(serverDb, 'app_config', 'system_reset'), {
+            setDoc(doc(dbRef, 'app_config', 'system_reset'), {
               resetEpochMs: nowMs,
               resetCount: nextResetCount,
               resetBy: String(resolvedPlayerId || 'admin').slice(0, 64),

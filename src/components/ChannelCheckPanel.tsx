@@ -9,7 +9,7 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { formatChannelsHandleSummary, REQUIRED_TELEGRAM_CHANNELS } from '../game/economy';
+import { formatChannelsHandleSummary, REQUIRED_TELEGRAM_CHANNELS, sanitizeExternalUrl } from '../game/economy';
 import type {
   ChannelVerificationItem,
   ChannelVerificationResult,
@@ -39,10 +39,11 @@ function buildFallbackItems(requiredChannels?: RequiredTelegramChannel[]): Chann
 }
 
 function openChannelLink(url: string) {
-  if (!url) return;
-  const handled = notifyTelegramOpenLink(url);
+  const safeUrl = sanitizeExternalUrl(url);
+  if (!safeUrl) return;
+  const handled = notifyTelegramOpenLink(safeUrl);
   if (!handled && typeof window !== 'undefined') {
-    window.open(url, '_blank', 'noopener,noreferrer');
+    window.open(safeUrl, '_blank', 'noopener,noreferrer');
   }
 }
 
@@ -213,13 +214,14 @@ export function ChannelCheckCard({
                   <span className="text-[11px] font-extrabold text-emerald-700 dark:text-emerald-300 px-2 py-1">
                     Joined
                   </span>
-                ) : ch.url ? (
+                ) : sanitizeExternalUrl(ch.url) ? (
                   <a
-                    href={ch.url}
+                    href={sanitizeExternalUrl(ch.url)!}
                     target="_blank"
                     rel="noopener noreferrer"
                     onClick={(e) => {
-                      if (notifyTelegramOpenLink(ch.url)) {
+                      const safeUrl = sanitizeExternalUrl(ch.url);
+                      if (safeUrl && notifyTelegramOpenLink(safeUrl)) {
                         e.preventDefault();
                       }
                     }}
@@ -318,6 +320,7 @@ interface ChannelCheckModalProps {
   checking?: boolean;
   checkError?: string | null;
   pendingPromoCode?: string | null;
+  mustJoinRequired?: boolean;
   onCheckChannels: () => void;
   onRetryCheck?: () => void;
   onClose: () => void;
@@ -329,6 +332,7 @@ export function ChannelCheckModal({
   checking = false,
   checkError = null,
   pendingPromoCode = null,
+  mustJoinRequired = false,
   onCheckChannels,
   onRetryCheck,
   onClose,
@@ -350,7 +354,7 @@ export function ChannelCheckModal({
     hasApiOrNetworkItemError ||
     (isStrictTelegram && !allJoined);
   const handleRetry = onRetryCheck ?? onCheckChannels;
-  const canDismissFreely = !isStrictTelegram || allJoined || Boolean(pendingPromoCode);
+  const canDismissFreely = !isStrictTelegram || allJoined || Boolean(pendingPromoCode) || mustJoinRequired;
 
   return (
     <div
@@ -367,12 +371,18 @@ export function ChannelCheckModal({
             </div>
             <div>
               <h2 id="channel-gate-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
-                {pendingPromoCode ? 'Join Channels to Unlock Gift' : 'Join Official Channels'}
+                {pendingPromoCode
+                  ? 'Join Channels to Unlock Gift'
+                  : mustJoinRequired
+                    ? 'Must Join Official Channels'
+                    : 'Join Official Channels'}
               </h2>
               <p className="text-xs text-stone-500 dark:text-stone-400">
                 {pendingPromoCode
                   ? `Join all required channels below, then tap Check Channels to claim ${pendingPromoCode}.`
-                  : 'Subscribe to required channels to unlock full rewards & payouts'}
+                  : mustJoinRequired
+                    ? 'Join every required Telegram channel below, then tap Check Channels to unlock all farm actions & withdrawals.'
+                    : 'Subscribe to required channels to unlock full rewards & payouts'}
               </p>
             </div>
           </div>
@@ -510,7 +520,7 @@ export function ChannelCheckModal({
               onClick={onClose}
               className="clay-btn clay-btn-neutral w-full min-h-[40px] rounded-xl text-xs font-bold text-stone-600 dark:text-stone-300"
             >
-              {allJoined ? 'Close' : pendingPromoCode ? 'Cancel' : 'Continue for now'}
+              {allJoined ? 'Close' : pendingPromoCode ? 'Cancel' : mustJoinRequired ? 'Close' : 'Continue for now'}
             </button>
           )}
         </div>
