@@ -586,7 +586,10 @@ service cloud.firestore {
           && isValidId(depositId)
           && isValidDeposit(incoming(), playerId)
           && incoming().createdAt == request.time
-          && exists(/databases/$(database)/documents/players/$(playerId));
+          && (
+            exists(/databases/$(database)/documents/players/$(playerId))
+            || existsAfter(/databases/$(database)/documents/players/$(playerId))
+          );
         allow update, delete: if false;
       }
 
@@ -598,7 +601,10 @@ service cloud.firestore {
           && isValidWithdrawal(incoming(), playerId)
           && incoming().status == 'pending'
           && incoming().createdAt == request.time
-          && exists(/databases/$(database)/documents/players/$(playerId))
+          && (
+            exists(/databases/$(database)/documents/players/$(playerId))
+            || existsAfter(/databases/$(database)/documents/players/$(playerId))
+          )
           && !exists(/databases/$(database)/documents/banned_users/$(playerId));
         allow update: if isValidId(playerId)
           && isValidId(withdrawalId)
@@ -617,7 +623,10 @@ service cloud.firestore {
           && isValidId(referredUid)
           && isValidReferral(incoming(), playerId, referredUid)
           && incoming().createdAt == request.time
-          && exists(/databases/$(database)/documents/players/$(playerId));
+          && (
+            exists(/databases/$(database)/documents/players/$(playerId))
+            || existsAfter(/databases/$(database)/documents/players/$(playerId))
+          );
         allow update: if isValidId(playerId)
           && isValidId(referredUid)
           && isValidReferral(incoming(), playerId, referredUid)
@@ -664,7 +673,10 @@ service cloud.firestore {
         && incoming().status == 'pending'
         && incoming().createdAt == request.time
         && incoming().updatedAt == request.time
-        && exists(/databases/$(database)/documents/players/$(request.resource.data.userId))
+        && (
+          exists(/databases/$(database)/documents/players/$(request.resource.data.userId))
+          || existsAfter(/databases/$(database)/documents/players/$(request.resource.data.userId))
+        )
         && !exists(/databases/$(database)/documents/banned_users/$(request.resource.data.userId));
       allow update: if isValidId(withdrawalId)
         && isValidWithdrawRequest(incoming(), withdrawalId)
@@ -682,7 +694,11 @@ service cloud.firestore {
       allow create: if isValidId(taskId)
         && isValidCustomTask(incoming(), taskId)
         && (!('claimedCount' in incoming()) || incoming().claimedCount == 0)
-        && (!('creatorUid' in incoming()) || exists(/databases/$(database)/documents/players/$(request.resource.data.creatorUid)))
+        && (
+          !('creatorUid' in incoming())
+          || exists(/databases/$(database)/documents/players/$(request.resource.data.creatorUid))
+          || existsAfter(/databases/$(database)/documents/players/$(request.resource.data.creatorUid))
+        )
         && incoming().createdAt == request.time;
       allow update: if isValidId(taskId)
         && isValidCustomTask(incoming(), taskId)

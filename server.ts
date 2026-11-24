@@ -6832,20 +6832,28 @@ async function startServer() {
 
     if (serverDb) {
       try {
-        const [playerSnap, refsSnap] = await Promise.all([
-          getFreshDoc(doc(serverDb, 'players', currentUid)),
-          getDocs(
-            query(
-              collection(serverDb, 'players', currentUid, 'referrals'),
-              orderBy('createdAtMs', 'desc'),
-              limit(200),
-            ),
-          ),
-        ]);
+        const referralsCol = collection(serverDb, 'players', currentUid, 'referrals');
+        const playerSnap = await getFreshDoc(doc(serverDb, 'players', currentUid));
         if (playerSnap.exists()) {
           playerData = playerSnap.data() as Record<string, unknown>;
         }
-        for (const rDoc of refsSnap.docs) {
+
+        const pageSize = 50;
+        const firstPage = await getDocs(
+          query(referralsCol, orderBy('createdAtMs', 'desc'), limit(pageSize)),
+        );
+        const allRefDocs = [...firstPage.docs];
+        let cursor = firstPage.docs.length === pageSize ? firstPage.docs[firstPage.docs.length - 1] : undefined;
+        for (let page = 1; page < 4 && cursor; page += 1) {
+          const nextPage: typeof firstPage = await getDocs(
+            query(referralsCol, orderBy('createdAtMs', 'desc'), startAfter(cursor), limit(pageSize)),
+          );
+          if (nextPage.empty) break;
+          allRefDocs.push(...nextPage.docs);
+          cursor = nextPage.docs.length === pageSize ? nextPage.docs[nextPage.docs.length - 1] : undefined;
+        }
+
+        for (const rDoc of allRefDocs) {
           const d = rDoc.data();
           const refUid = String(d.referredUid || rDoc.id || '').trim();
           if (!refUid) continue;

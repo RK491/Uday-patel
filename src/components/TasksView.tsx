@@ -50,6 +50,7 @@ import {
   getWithdrawAdGateStatus,
   mergeTaskDefinitions,
   normalizeTelegramChannelHandle,
+  resolveLiveTaskChannelLinks,
   resolveTaskPricingConfig,
   sanitizeExternalUrl,
   sortTasks,
@@ -70,7 +71,6 @@ import type {
   UserFarmProfile,
 } from '../types/farm';
 import {
-  getTelegramChannelUrl,
   notifyTelegramOpenLink,
   subscribeTelegramAppActivated,
 } from '../utils/telegram';
@@ -131,7 +131,6 @@ interface TasksViewProps {
   onRefundTask?: (taskId: string) => Promise<boolean>;
 }
 
-const DEFAULT_PAYOUT_CHANNEL_URL = getTelegramChannelUrl('@AG_PAYOUTS');
 const TASK_VERIFY_DELAY_MS = 1400;
 const TASKS_AUTO_REFRESH_MS = 60_000;
 const PULL_REFRESH_THRESHOLD_PX = 56;
@@ -144,7 +143,7 @@ export function TasksView({
   adConfig,
   requiredChannels,
   channelsGateEnabled = true,
-  payoutChannelUrl = DEFAULT_PAYOUT_CHANNEL_URL,
+  payoutChannelUrl,
   getCodeChannelUrl,
   botUsername,
   taskPricingConfig,
@@ -179,10 +178,6 @@ export function TasksView({
   const resolvedBotTag = botUsername
     ? `@${botUsername.replace(/^@+/, '')}`
     : 'our Telegram Bot';
-  const resolvedGetCodeUrl =
-    (getCodeChannelUrl || '').trim() ||
-    (payoutChannelUrl || '').trim() ||
-    DEFAULT_GET_CODE_CHANNEL_URL;
   const [filterTab, setFilterTab] = useState<FilterTab>('daily');
   const [sortBy, setSortBy] = useState<TaskSortOption>('most_reward');
   const [promoInput, setPromoInput] = useState('');
@@ -203,6 +198,10 @@ export function TasksView({
   const checkTimersRef = useRef<Record<string, number>>({});
   const verifyingTaskIdsRef = useRef<Set<string>>(new Set());
   const pendingReturnTaskIdRef = useRef<string | null>(null);
+  const taskStagesRef = useRef(taskStages);
+  taskStagesRef.current = taskStages;
+  const completedTaskIdsRef = useRef(profile.completedTaskIds);
+  completedTaskIdsRef.current = profile.completedTaskIds;
 
   // Pull-to-refresh & 60s auto-refresh state
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -241,13 +240,16 @@ export function TasksView({
       setIsRefreshing(true);
       try {
         await onRefreshTasks(silent);
+        if (!silent) {
+          void onCheckChannels?.();
+        }
         lastRefreshAtRef.current = Date.now();
       } finally {
         refreshingRef.current = false;
         setIsRefreshing(false);
       }
     },
-    [onRefreshTasks],
+    [onCheckChannels, onRefreshTasks],
   );
 
   useEffect(() => {
@@ -322,7 +324,26 @@ export function TasksView({
   const leghornPack = CHICKEN_PACKS[0];
   const currentProductionRate = calculateProductionRate(profile);
 
-  const allTasks = mergeTaskDefinitions(customTasks);
+  const liveChannelLinks = useMemo(
+    () =>
+      resolveLiveTaskChannelLinks({
+        requiredChannels,
+        payoutChannelUrl: payoutChannelUrl || undefined,
+        getCodeChannelUrl: getCodeChannelUrl || undefined,
+      }),
+    [requiredChannels, payoutChannelUrl, getCodeChannelUrl],
+  );
+  const resolvedGetCodeUrl =
+    (liveChannelLinks.giftCodeChannelUrl || '').trim() ||
+    (getCodeChannelUrl || '').trim() ||
+    DEFAULT_GET_CODE_CHANNEL_URL;
+
+  const allTasks = useMemo(
+    () => mergeTaskDefinitions(customTasks, liveChannelLinks),
+    [customTasks, liveChannelLinks],
+  );
+  const allTasksRef = useRef(allTasks);
+  allTasksRef.current = allTasks;
   const socialTasks = sortTasks(
     allTasks.filter((t) => t.category === 'social' || t.category === 'milestone'),
     sortBy,
@@ -538,12 +559,12 @@ export function TasksView({
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       const pendingId = pendingReturnTaskIdRef.current;
       if (!pendingId) return;
-      const targetTask = allTasks.find((t) => t.id === pendingId);
-      if (!targetTask || profile.completedTaskIds.includes(pendingId)) {
+      const targetTask = allTasksRef.current.find((t) => t.id === pendingId);
+      if (!targetTask || completedTaskIdsRef.current.includes(pendingId)) {
         pendingReturnTaskIdRef.current = null;
         return;
       }
-      const stage = taskStages[pendingId];
+      const stage = taskStagesRef.current[pendingId];
       if (stage !== 'checking' && stage !== 'retry') return;
 
       if (checkTimersRef.current[pendingId]) {
@@ -559,7 +580,7 @@ export function TasksView({
     };
 
     return subscribeTelegramAppActivated(handleReturnFromTelegram);
-  }, [allTasks, markTaskVerifiedLocally, profile.completedTaskIds, taskStages]);
+  }, [markTaskVerifiedLocally]);
 
   const handleClaimCheckedTask = async (task: TaskDefinition) => {
     if (profile.completedTaskIds.includes(task.id)) return;
@@ -576,7 +597,7 @@ export function TasksView({
         setTaskStages((prev) => ({ ...prev, [task.id]: 'retry' }));
         setTaskRetryReasons((prev) => ({
           ...prev,
-          [task.id]: 'Live channel verification unavailable right now — please Retry.',
+          [task.id]: 'Live channel verification unavailable right now — tap Join, then Claim.',
         }));
         return;
       }
@@ -698,27 +719,15 @@ export function TasksView({
 
     if (stage === 'retry') {
       return (
-        <div className="flex items-center gap-1.5 shrink-0">
-          {task.actionUrl && (
-            <button
-              type="button"
-              onClick={() => startCheckingFlow(task)}
-              aria-label={`Join ${task.title}`}
-              className="clay-btn clay-btn-sky min-h-[42px] px-2.5 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
-            >
-              <span>Join</span>
-              <ExternalLink className="w-3 h-3" />
-            </button>
-          )}
-          <button
-            type="button"
-            onClick={() => void handleClaimCheckedTask(task)}
-            className="clay-btn clay-btn-amber min-h-[42px] px-3.5 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
-          >
-            <RotateCcw className="w-3.5 h-3.5" />
-            <span>Retry</span>
-          </button>
-        </div>
+        <button
+          type="button"
+          onClick={() => startCheckingFlow(task)}
+          aria-label={`Join ${task.title}`}
+          className="clay-btn clay-btn-amber min-h-[42px] min-w-[78px] px-4 rounded-2xl text-xs font-extrabold inline-flex items-center justify-center gap-1 shrink-0"
+        >
+          <span>{task.actionUrl ? 'Join' : 'Start'}</span>
+          {task.actionUrl && <ExternalLink className="w-3 h-3" />}
+        </button>
       );
     }
 
@@ -848,6 +857,16 @@ export function TasksView({
     const isLowSlots = hasSlotCounter && remainingSlots > 0 && slotPct <= 25;
     const isPaidTask = Boolean(task.creatorUid || (task.paidCoins ?? 0) > 0);
     const hasChannelCheck = getTaskChannelCheckMode(task) !== 'none';
+    const liveChannelHandle = hasChannelCheck
+      ? normalizeTelegramChannelHandle(task.actionUrl || '').handle
+      : '';
+    const resolvedSubtitle =
+      task.id === 'daily_reinvest' && !done
+        ? profile.lastReinvestDate === todayStr
+          ? 'Reinvest confirmed today — tap Claim for +100 coins!'
+          : 'Reinvest min. 500 eggs (+5% extra) to unlock this reward'
+        : task.subtitle ||
+          (liveChannelHandle ? `Live membership check · ${liveChannelHandle}` : undefined);
     const spotsLeftLabel = `${remainingSlots?.toLocaleString() ?? 0}/${totalSlots.toLocaleString()} spots left`;
     const stage = taskStages[task.id] ?? 'idle';
 
@@ -878,17 +897,13 @@ export function TasksView({
                 )}
                 {hasChannelCheck && (
                   <span className="rounded-md bg-sky-100/80 dark:bg-sky-950/60 border border-sky-300/70 dark:border-sky-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-sky-800 dark:text-sky-300 shrink-0">
-                    Verified
+                    Live Sync
                   </span>
                 )}
               </div>
-              {task.subtitle && (
+              {resolvedSubtitle && (
                 <div className="text-[11px] text-stone-500 dark:text-stone-400 truncate mt-0.5">
-                  {task.id === 'daily_reinvest' && !done
-                    ? profile.lastReinvestDate === todayStr
-                      ? 'Reinvest confirmed today — tap Claim for +100 coins!'
-                      : 'Reinvest min. 500 eggs (+5% extra) to unlock this reward'
-                    : task.subtitle}
+                  {resolvedSubtitle}
                 </div>
               )}
               <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
@@ -999,7 +1014,7 @@ export function TasksView({
                 <AlertCircle className="w-3 h-3 shrink-0" />
                 <span>
                   {taskRetryReasons[task.id] ||
-                    `Not joined ${taskRetryHandles[task.id] || 'this channel'} yet — tap Join, then Retry.`}
+                    `Not joined ${taskRetryHandles[task.id] || 'this channel'} yet — tap Join, then Claim.`}
                 </span>
               </div>
             )}

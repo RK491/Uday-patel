@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   ArrowLeft,
   CheckCircle2,
@@ -69,6 +69,17 @@ export function WithdrawView({
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const walletInputRef = useRef<HTMLInputElement>(null);
+  const amountInputRef = useRef<HTMLInputElement>(null);
+  const amountEditedRef = useRef(false);
+
+  useEffect(() => {
+    if (amountEditedRef.current) return;
+    if (typeof document !== 'undefined' && document.activeElement === amountInputRef.current) return;
+    const nextDefault =
+      profile.eggs >= effectiveMinWithdraw ? String(Math.min(profile.eggs, effectiveMinWithdraw)) : '';
+    setAmountInput(nextDefault);
+  }, [profile.eggs, effectiveMinWithdraw]);
 
   const activeRequiredChannels = (requiredChannels ?? []).filter(
     (ch) => ch.enabled !== false && Boolean(ch.handle),
@@ -93,11 +104,11 @@ export function WithdrawView({
         setErrorMsg(null);
         return;
       }
+      setErrorMsg('Clipboard does not contain a valid TON address. Please paste manually.');
     } catch {
-      // Clipboard blocked in iframe/browser; fill a valid TON test address
+      setErrorMsg('Clipboard access blocked here — please paste your TON wallet address manually.');
     }
-    setWalletAddress('UQB06dO9oc06d-1c8DF03FLdCznEHz_aLIA69fxzITcunwpr');
-    setErrorMsg(null);
+    walletInputRef.current?.focus();
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -117,6 +128,7 @@ export function WithdrawView({
     setSuccessMsg(
       `Withdrawal submitted for ${numericEggs.toLocaleString()} eggs (${receiveGram} GRAM) — Pending Admin approval!`,
     );
+    amountEditedRef.current = false;
     const remaining = profile.eggs - numericEggs;
     setAmountInput(remaining >= effectiveMinWithdraw ? String(Math.min(remaining, effectiveMinWithdraw)) : '');
     setMemo('');
@@ -270,6 +282,7 @@ export function WithdrawView({
           </label>
           <div className="flex gap-2">
             <input
+              ref={walletInputRef}
               id="withdraw-wallet"
               type="text"
               value={walletAddress}
@@ -324,12 +337,14 @@ export function WithdrawView({
           <div className="clay-inset flex items-center gap-2 px-3 py-1.5">
             <EggIcon className="w-5 h-5 shrink-0" />
             <input
+              ref={amountInputRef}
               id="withdraw-amount"
               type="number"
               min={0}
               max={profile.eggs}
               value={amountInput}
               onChange={(e) => {
+                amountEditedRef.current = true;
                 setAmountInput(e.target.value);
                 setErrorMsg(null);
               }}
@@ -347,6 +362,7 @@ export function WithdrawView({
                 key={pct}
                 type="button"
                 onClick={() => {
+                  amountEditedRef.current = true;
                   const val = Math.floor(profile.eggs * pct);
                   setAmountInput(String(val));
                   setErrorMsg(null);

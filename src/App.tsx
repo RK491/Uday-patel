@@ -81,6 +81,7 @@ import {
   renderPayoutChannelApproveMessage,
   renderWithdrawApproveMessage,
   resolveEconomyConfig,
+  resolveLiveTaskChannelLinks,
   resolveMaintenanceConfig,
   resolveTaskPricingConfig,
   shouldShowSignUpBonusClaim,
@@ -437,6 +438,24 @@ export default function App() {
         .join(','),
     [activeRequiredChannels],
   );
+  const hasRequiredPayoutChannel = useMemo(
+    () =>
+      activeRequiredChannels.some((ch) =>
+        /payout|pay/i.test(`${ch.id} ${ch.handle} ${ch.title}`),
+      ),
+    [activeRequiredChannels],
+  );
+  const liveTaskChannelLinks = useMemo(
+    () =>
+      resolveLiveTaskChannelLinks({
+        requiredChannels: activeRequiredChannels,
+        payoutChannelUrl: hasRequiredPayoutChannel ? undefined : getTelegramChannelUrl(payoutChannel),
+        getCodeChannelUrl: channelsConfig.getCodeChannelUrl || undefined,
+      }),
+    [activeRequiredChannels, channelsConfig.getCodeChannelUrl, hasRequiredPayoutChannel, payoutChannel],
+  );
+  const liveTaskChannelLinksRef = useRef(liveTaskChannelLinks);
+  liveTaskChannelLinksRef.current = liveTaskChannelLinks;
 
   const [activeTab, setActiveTab] = useState<NavTab>(() => {
     const initialAction = parseStartAppAction(
@@ -517,7 +536,6 @@ export default function App() {
     }
   });
   const [checkingChannels, setCheckingChannels] = useState(false);
-  const [refreshingMembership, setRefreshingMembership] = useState(false);
   const [channelCheckError, setChannelCheckError] = useState<string | null>(null);
   const [showChannelGateModal, setShowChannelGateModal] = useState(false);
   const [pendingPromoClaimCode, setPendingPromoClaimCode] = useState<string | null>(null);
@@ -2560,37 +2578,6 @@ export default function App() {
     }
   }, []);
 
-  const handleRefreshMembership = useCallback(async () => {
-    if (refreshingMembership || checkingChannels) return;
-    setRefreshingMembership(true);
-    playTabTapSound(soundsEnabled);
-    triggerHapticFeedback('selection');
-    try {
-      clearMembershipCache();
-      if (!channelsGateEnabled) {
-        showToast('Membership cache cleared — no required channels active.');
-        return;
-      }
-      const result = await handleCheckChannels({ forceRefresh: true });
-      if (
-        mustJoinGateEnabledRef.current &&
-        !isChannelVerificationSatisfied(result, channelsConfigRef.current)
-      ) {
-        setShowChannelGateModal(true);
-      }
-    } finally {
-      setRefreshingMembership(false);
-    }
-  }, [
-    channelsGateEnabled,
-    checkingChannels,
-    clearMembershipCache,
-    handleCheckChannels,
-    refreshingMembership,
-    showToast,
-    soundsEnabled,
-  ]);
-
   const ensureMustJoinVerified = useCallback(
     async (actionLabel?: string): Promise<boolean> => {
       if (!mustJoinGateEnabledRef.current) {
@@ -2662,7 +2649,7 @@ export default function App() {
       const displayHandle = normalized.handle || 'this channel';
       const numericUserId = extractTelegramNumericUserId(latestProfileRef.current.uid);
       if (!numericUserId) {
-        const reason = `Open in Telegram and join ${displayHandle} first, then tap Retry.`;
+        const reason = `Open in Telegram and join ${displayHandle} first, then tap Join and Claim.`;
         triggerHapticFeedback('warning');
         showToast(reason);
         return { joined: false, handle: displayHandle, status: 'no_telegram_user', reason };
@@ -2670,6 +2657,7 @@ export default function App() {
       try {
         const res = await fetch(resolveApiUrl('/api/telegram/check-task-channel'), {
           method: 'POST',
+          cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             playerId: latestProfileRef.current.uid,
@@ -2677,6 +2665,7 @@ export default function App() {
             token: playerSessionTokenRef.current,
             actionUrl: trimmedUrl,
             requireChannelCheck: true,
+            _ts: Date.now(),
           }),
         });
         const contentType = (res.headers.get('content-type') || '').toLowerCase();
@@ -2711,7 +2700,7 @@ export default function App() {
         if (!res.ok || !data?.ok) {
           if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
           const reason =
-            data?.reason || `Could not confirm ${displayHandle} join — tap Retry.`;
+            data?.reason || `Could not confirm ${displayHandle} join — tap Join, then Claim.`;
           triggerHapticFeedback('warning');
           showToast(reason);
           return { joined: false, handle: displayHandle, status: 'api_error', reason };
@@ -2725,7 +2714,7 @@ export default function App() {
         if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
         const handleLabel = data.handle || displayHandle;
         const reason =
-          data.reason || `Not joined ${handleLabel} yet — tap Join, then Retry.`;
+          data.reason || `Not joined ${handleLabel} yet — tap Join, then Claim.`;
         triggerHapticFeedback('warning');
         showToast(reason);
         return {
@@ -2736,7 +2725,7 @@ export default function App() {
         };
       } catch {
         if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
-        const netReason = `Unable to verify ${displayHandle} right now — tap Retry!`;
+        const netReason = `Unable to verify ${displayHandle} right now — tap Join, then Claim!`;
         triggerHapticFeedback('warning');
         showToast(netReason);
         return { joined: false, handle: displayHandle, status: 'network_error', reason: netReason };
@@ -2752,7 +2741,11 @@ export default function App() {
       const numericUserId = extractTelegramNumericUserId(current.uid);
       if (!numericUserId) return;
 
-      const verifiable = getVerifiableClaimedChannelTasks(current.completedTaskIds, customTasks);
+      const verifiable = getVerifiableClaimedChannelTasks(
+        current.completedTaskIds,
+        customTasks,
+        liveTaskChannelLinksRef.current,
+      );
       if (verifiable.length === 0) return;
 
       const now = Date.now();
@@ -2791,7 +2784,13 @@ export default function App() {
 
       if (leftTaskIds.length === 0) return;
       const latest = latestProfileRef.current;
-      const penaltyRes = applyLeftChannelPenalties(latest, leftTaskIds, Date.now(), customTasks);
+      const penaltyRes = applyLeftChannelPenalties(
+        latest,
+        leftTaskIds,
+        Date.now(),
+        customTasks,
+        liveTaskChannelLinksRef.current,
+      );
       if (!penaltyRes) return;
 
       triggerHapticFeedback('warning');
@@ -3606,9 +3605,11 @@ export default function App() {
         const items = await fetchCustomTasksFromFirestore();
         setCustomTasks(items);
         if (!silent) {
+          verifiedChannelTaskProofRef.current = {};
+          void runClaimedChannelLeaveAudit(true);
           playSoftTapSound(soundsEnabled);
           triggerHapticFeedback('light');
-          showToast('Task slots refreshed');
+          showToast('Task slots & live channels refreshed');
         }
         return true;
       } catch {
@@ -3618,7 +3619,7 @@ export default function App() {
         return false;
       }
     },
-    [showToast, soundsEnabled],
+    [runClaimedChannelLeaveAudit, showToast, soundsEnabled],
   );
 
   const handleTopUpTask = async (taskId: string, budgetCoins: number): Promise<boolean> => {
@@ -5662,7 +5663,9 @@ export default function App() {
 
   const handleCompleteTask = async (taskId: string) => {
     if (!(await ensureMustJoinVerified('complete tasks'))) return;
-    const task = mergeTaskDefinitions(customTasks).find((t) => t.id === taskId);
+    const task = mergeTaskDefinitions(customTasks, liveTaskChannelLinksRef.current).find(
+      (t) => t.id === taskId,
+    );
     const checkMode = task ? getTaskChannelCheckMode(task) : 'none';
     if (task && checkMode !== 'none') {
       const proofAt = verifiedChannelTaskProofRef.current[taskId] ?? 0;
@@ -5682,7 +5685,13 @@ export default function App() {
     }
 
     const now = Date.now();
-    const res = completeTask(latestProfileRef.current, taskId, now, customTasks);
+    const res = completeTask(
+      latestProfileRef.current,
+      taskId,
+      now,
+      customTasks,
+      liveTaskChannelLinksRef.current,
+    );
     if ('error' in res) {
       showToast(res.error);
       return;
@@ -6432,11 +6441,9 @@ export default function App() {
           todayStr={todayStr}
           customTasks={customTasks}
           adConfig={adConfig}
-          payoutChannelUrl={getTelegramChannelUrl(payoutChannel)}
+          payoutChannelUrl={liveTaskChannelLinks.payoutChannelUrl}
           getCodeChannelUrl={
-            channelsConfig.getCodeChannelUrl ||
-            getTelegramChannelUrl(payoutChannel) ||
-            DEFAULT_GET_CODE_CHANNEL_URL
+            liveTaskChannelLinks.giftCodeChannelUrl || DEFAULT_GET_CODE_CHANNEL_URL
           }
           botUsername={telegramBotConfig?.botUsername ?? botConfigStatus?.botUsername ?? null}
           taskPricingConfig={taskPricingConfig}
@@ -6863,10 +6870,6 @@ export default function App() {
               onActivateCoopFever={handleActivateCoopFever}
               onWatchCoopFeverAd={() => void handleTriggerCoopFeverAd()}
               onBuyChickens={() => navigateTab('packs')}
-              onRefreshMembership={() => void handleRefreshMembership()}
-              refreshingMembership={refreshingMembership || checkingChannels}
-              membershipVerified={channelsGateEnabled ? membershipVerified : null}
-              mustJoinRequired={mustJoinGateEnabled}
             />
           </div>
 

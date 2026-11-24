@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Globe, Plus, ShieldCheck, Trophy, Volume2, VolumeX } from 'lucide-react';
-import { motion, useReducedMotion } from 'motion/react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { UserFarmProfile } from '../types/farm';
 import { CoinIcon, EggIcon, PlayerAvatar } from './GameIcons';
 import { PWAInstallButton } from './PWAControls';
@@ -42,6 +42,45 @@ export function TopBar({
 }: TopBarProps) {
   const prefersReducedMotion = useReducedMotion();
   const [coinArrivalPulse, setCoinArrivalPulse] = useState(0);
+  const [floatingCoinDeltas, setFloatingCoinDeltas] = useState<Array<{ id: number; amount: number }>>([]);
+  const [coinLiftSeq, setCoinLiftSeq] = useState(0);
+  const prevUidRef = useRef<string>(profile.uid);
+  const prevCoinsRef = useRef<number>(profile.coins);
+  const floatSeqRef = useRef(0);
+  const coinDeltaTimersRef = useRef<Set<number>>(new Set());
+
+  useEffect(() => {
+    const timers = coinDeltaTimersRef.current;
+    return () => {
+      timers.forEach((id) => window.clearTimeout(id));
+      timers.clear();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (prevUidRef.current !== profile.uid) {
+      prevUidRef.current = profile.uid;
+      prevCoinsRef.current = profile.coins;
+      coinDeltaTimersRef.current.forEach((id) => window.clearTimeout(id));
+      coinDeltaTimersRef.current.clear();
+      setFloatingCoinDeltas([]);
+      return;
+    }
+
+    const delta = profile.coins - prevCoinsRef.current;
+    prevCoinsRef.current = profile.coins;
+
+    if (delta > 0) {
+      const nextId = ++floatSeqRef.current;
+      setCoinLiftSeq((n) => n + 1);
+      setFloatingCoinDeltas((prev) => [...prev.slice(-2), { id: nextId, amount: delta }]);
+      const cleanupId = window.setTimeout(() => {
+        coinDeltaTimersRef.current.delete(cleanupId);
+        setFloatingCoinDeltas((prev) => prev.filter((item) => item.id !== nextId));
+      }, 1150);
+      coinDeltaTimersRef.current.add(cleanupId);
+    }
+  }, [profile.coins, profile.uid]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
@@ -182,7 +221,7 @@ export function TopBar({
                 : { scale: 1 }
             }
             transition={{ duration: 0.36, ease: [0.16, 1, 0.3, 1] }}
-            className="clay-card !rounded-2xl flex items-center justify-between gap-2 px-3 py-1.5"
+            className="clay-card relative !rounded-2xl flex items-center justify-between gap-2 px-3 py-1.5"
           >
             <div className="flex items-center gap-2 min-w-0">
               <motion.div
@@ -195,16 +234,54 @@ export function TopBar({
               >
                 <CoinIcon className="w-5 h-5" />
               </motion.div>
-              <div className="min-w-0">
+              <div className="relative min-w-0">
+                <AnimatePresence>
+                  {!prefersReducedMotion &&
+                    floatingCoinDeltas.map((delta) => (
+                      <motion.span
+                        key={delta.id}
+                        aria-hidden="true"
+                        initial={{ opacity: 0, y: 6, scale: 0.85 }}
+                        animate={{
+                          opacity: [0, 1, 1, 0],
+                          y: [6, -6, -15, -23],
+                          scale: [0.85, 1.05, 1, 0.95],
+                        }}
+                        exit={{ opacity: 0 }}
+                        transition={{
+                          duration: 1.05,
+                          times: [0, 0.18, 0.72, 1],
+                          ease: [0.16, 1, 0.3, 1],
+                        }}
+                        className="pointer-events-none absolute -top-2 left-0 z-20 inline-flex items-center gap-0.5 rounded-full bg-emerald-500/90 dark:bg-emerald-500 px-1.5 py-0.5 text-[10px] font-extrabold font-mono-num text-white shadow-md whitespace-nowrap"
+                      >
+                        +{delta.amount.toLocaleString()}
+                      </motion.span>
+                    ))}
+                </AnimatePresence>
                 <motion.div
-                  key={profile.coins}
-                  initial={prefersReducedMotion ? false : { scale: 1.09 }}
-                  animate={{ scale: 1 }}
-                  transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
+                  key={`coins-${profile.coins}-${coinLiftSeq}`}
+                  initial={
+                    prefersReducedMotion
+                      ? false
+                      : coinLiftSeq > 0
+                        ? { y: 4, scale: 1.12 }
+                        : { scale: 1.06 }
+                  }
+                  animate={
+                    prefersReducedMotion
+                      ? { scale: 1 }
+                      : coinLiftSeq > 0
+                        ? { y: [4, -3, 0], scale: [1.12, 1.06, 1] }
+                        : { y: 0, scale: 1 }
+                  }
+                  transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
                   className={`text-sm sm:text-base font-extrabold font-mono-num leading-none truncate origin-left ${
                     profile.coins < 0
                       ? 'text-rose-600 dark:text-rose-400'
-                      : 'text-stone-900 dark:text-stone-100'
+                      : coinLiftSeq > 0
+                        ? 'text-emerald-700 dark:text-emerald-300 transition-colors duration-300'
+                        : 'text-stone-900 dark:text-stone-100 transition-colors duration-300'
                   }`}
                 >
                   {profile.coins.toLocaleString()}

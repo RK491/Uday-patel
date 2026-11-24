@@ -957,7 +957,14 @@ export async function commitPlayerMutation(params: {
         ]);
 
         if (playerSnap.exists()) {
-          transaction.update(playerRef, toFirestoreProfilePayload(params.profile, false));
+          const playerRaw = playerSnap.data();
+          const syncedPlayer: UserFarmProfile = {
+            ...params.profile,
+            uid: String(playerRaw.uid || params.profile.uid),
+            createdAtMs: Number(playerRaw.createdAtMs ?? params.profile.createdAtMs),
+            referralCode: String(playerRaw.referralCode || params.profile.referralCode),
+          };
+          transaction.update(playerRef, toFirestoreProfilePayload(syncedPlayer, false));
         } else {
           transaction.set(playerRef, toFirestoreProfilePayload(params.profile, true));
         }
@@ -1113,14 +1120,18 @@ export async function commitPlayerMutation(params: {
           ...params.profile,
           coins: currentCoins + dep.coinsAmount,
           firstDepositBonusUsed: true,
+          ...(playerRaw
+            ? {
+                uid: String(playerRaw.uid || params.profile.uid),
+                createdAtMs: Number(playerRaw.createdAtMs ?? params.profile.createdAtMs),
+                referralCode: String(playerRaw.referralCode || params.profile.referralCode),
+              }
+            : {}),
           ...(remoteReferredBy && !params.profile.referredBy
             ? {
                 referredBy: remoteReferredBy,
                 referralActivated: Boolean(playerRaw?.referralActivated ?? false),
               }
-            : {}),
-          ...(playerRaw?.createdAtMs !== undefined
-            ? { createdAtMs: Number(playerRaw.createdAtMs) }
             : {}),
         };
 
@@ -1249,7 +1260,9 @@ export async function commitPlayerMutation(params: {
     const shouldPreserveConcurrentReferral = Boolean(remoteReferredBy && !params.profile.referredBy);
     finalProfile = {
       ...params.profile,
+      uid: String(existingRaw.uid || params.profile.uid),
       createdAtMs: Number(existingRaw.createdAtMs ?? params.profile.createdAtMs),
+      referralCode: String(existingRaw.referralCode || params.profile.referralCode),
       ...(shouldPreserveConcurrentReferral
         ? {
             referredBy: remoteReferredBy,
@@ -2070,7 +2083,8 @@ export async function createPaidCustomTaskInFirestore(params: {
       if (!playerSnap.exists()) {
         return { error: 'Player profile not synced yet.' } as const;
       }
-      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      const playerRaw = playerSnap.data();
+      const liveCoins = Number(playerRaw.coins ?? 0);
       if (
         liveCoins < paidCoins ||
         (liveCoins < effectiveMinTotal && paidCoins + cleanReward < effectiveMinTotal)
@@ -2082,6 +2096,9 @@ export async function createPaidCustomTaskInFirestore(params: {
 
       const syncedProfile: UserFarmProfile = {
         ...params.profile,
+        uid: String(playerRaw.uid || params.profile.uid),
+        createdAtMs: Number(playerRaw.createdAtMs ?? params.profile.createdAtMs),
+        referralCode: String(playerRaw.referralCode || params.profile.referralCode),
         coins: liveCoins - paidCoins,
       };
 
@@ -2183,7 +2200,8 @@ export async function topUpPaidCustomTaskInFirestore(params: {
         return { error: 'Only the campaign owner can top up this task.' } as const;
       }
 
-      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      const playerRaw = playerSnap.data();
+      const liveCoins = Number(playerRaw.coins ?? 0);
       if (liveCoins < addedPaidCoins) {
         return {
           error: `Need ${addedPaidCoins.toLocaleString()} coins to top up (you have ${liveCoins.toLocaleString()}).`,
@@ -2205,6 +2223,9 @@ export async function topUpPaidCustomTaskInFirestore(params: {
 
       const syncedProfile: UserFarmProfile = {
         ...params.profile,
+        uid: String(playerRaw.uid || params.profile.uid),
+        createdAtMs: Number(playerRaw.createdAtMs ?? params.profile.createdAtMs),
+        referralCode: String(playerRaw.referralCode || params.profile.referralCode),
         coins: liveCoins - addedPaidCoins,
       };
 
@@ -2303,9 +2324,13 @@ export async function refundPaidCustomTaskInFirestore(params: {
         requireChannelCheck: parsed.requireChannelCheck,
       });
 
-      const liveCoins = Number(playerSnap.data().coins ?? 0);
+      const playerRaw = playerSnap.data();
+      const liveCoins = Number(playerRaw.coins ?? 0);
       const syncedProfile: UserFarmProfile = {
         ...params.profile,
+        uid: String(playerRaw.uid || params.profile.uid),
+        createdAtMs: Number(playerRaw.createdAtMs ?? params.profile.createdAtMs),
+        referralCode: String(playerRaw.referralCode || params.profile.referralCode),
         coins: liveCoins + refundCoins,
       };
 

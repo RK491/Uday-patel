@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Award, Bot, Feather, Flame, Package, RefreshCw, Sparkles, Star, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Sparkles, Star, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import {
@@ -40,10 +40,6 @@ interface FarmMeadowProps {
   onActivateCoopFever?: () => void;
   onWatchCoopFeverAd?: () => void;
   onBuyChickens?: () => void;
-  onRefreshMembership?: () => void;
-  refreshingMembership?: boolean;
-  membershipVerified?: boolean | null;
-  mustJoinRequired?: boolean;
 }
 
 interface RoamingHen {
@@ -145,10 +141,6 @@ export function FarmMeadow({
   onActivateCoopFever,
   onWatchCoopFeverAd,
   onBuyChickens,
-  onRefreshMembership,
-  refreshingMembership = false,
-  membershipVerified = null,
-  mustJoinRequired = false,
 }: FarmMeadowProps) {
   const prefersReducedMotion = useReducedMotion();
   const [stepTick, setStepTick] = useState(0);
@@ -841,57 +833,6 @@ export function FarmMeadow({
                 </span>
               </motion.button>
             </div>
-
-            {/* Row 3: Refresh Membership (Clear Cache & Re-Verify Channels) */}
-            {onRefreshMembership && (
-              <div className="flex items-center justify-between gap-2">
-                <motion.button
-                  key={`refresh-membership-${entranceEpoch}`}
-                  type="button"
-                  disabled={refreshingMembership}
-                  onClick={onRefreshMembership}
-                  aria-label="Refresh Membership — clear cached verification and re-verify Telegram channels"
-                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
-                  animate={{ opacity: 1, y: 0, scale: 1 }}
-                  whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
-                  whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
-                  transition={{ ...cardTransition, delay: 0.11 }}
-                  className={`clay-btn pointer-events-auto min-h-[38px] px-3 py-1.5 rounded-2xl backdrop-blur-md text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg disabled:opacity-70 ${
-                    membershipVerified === true
-                      ? 'bg-stone-950/75 hover:bg-stone-900/85 border border-emerald-400/45 text-emerald-200'
-                      : mustJoinRequired
-                        ? 'bg-amber-950/85 hover:bg-amber-900/90 border border-amber-400/60 text-amber-200'
-                        : 'bg-stone-950/72 hover:bg-stone-900/85 border border-sky-400/40 text-sky-100'
-                  }`}
-                >
-                  <RefreshCw
-                    className={`w-3.5 h-3.5 shrink-0 ${
-                      refreshingMembership ? 'animate-spin' : ''
-                    } ${
-                      membershipVerified === true
-                        ? 'text-emerald-400'
-                        : mustJoinRequired
-                          ? 'text-amber-300'
-                          : 'text-sky-300'
-                    }`}
-                  />
-                  <span>
-                    {refreshingMembership ? 'Refreshing Membership...' : 'Refresh Membership'}
-                  </span>
-                  {mustJoinRequired && (
-                    <span
-                      className={`px-1.5 py-0.5 rounded-md text-[9px] font-extrabold uppercase tracking-wider ${
-                        membershipVerified === true
-                          ? 'bg-emerald-500/25 text-emerald-200'
-                          : 'bg-amber-500/30 text-amber-100'
-                      }`}
-                    >
-                      {membershipVerified === true ? 'Verified' : 'Must Join'}
-                    </span>
-                  )}
-                </motion.button>
-              </div>
-            )}
           </motion.div>
         )}
       </AnimatePresence>

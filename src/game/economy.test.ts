@@ -108,6 +108,7 @@ import {
   getGoldenEggCooldownRemainingMs,
   getTaskRemainingSlots,
   getTotalAdsWatched,
+  getVerifiableClaimedChannelTasks,
   getWithdrawAdsWatched,
   getWithdrawalStatusMeta,
   getWithdrawAdGateStatus,
@@ -142,6 +143,7 @@ import {
   recordCompletedGateAd,
   recordCoopFeverAd,
   REQUIRED_TELEGRAM_CHANNELS,
+  resolveLiveTaskChannelLinks,
   shouldRequireAdForAction,
   shouldShowSignUpBonusClaim,
   SIGNUP_BONUS_COINS,
@@ -4039,3 +4041,92 @@ test('Must Join requirement helper and channel verification satisfaction guard a
   );
 });
 
+test('resolveLiveTaskChannelLinks and mergeTaskDefinitions live-sync gift code, official, and payout channel tasks', () => {
+  const liveLinks = resolveLiveTaskChannelLinks({
+    requiredChannels: [
+      {
+        id: 'official_news',
+        handle: '@LiveOfficialNews',
+        title: 'Official News',
+        description: 'Official announcements',
+        url: 'https://t.me/LiveOfficialNews',
+        enabled: true,
+      },
+      {
+        id: 'payout_feed',
+        handle: '@LivePayoutFeed',
+        title: 'Live Payouts',
+        description: 'Withdrawal proofs',
+        url: 'https://t.me/LivePayoutFeed',
+        enabled: true,
+      },
+    ],
+    payoutChannelUrl: 'https://t.me/AdminPayoutOverride',
+    getCodeChannelUrl: 'https://t.me/LiveGiftCodes',
+  });
+
+  assert.equal(liveLinks.officialChannelUrl, 'https://t.me/LiveOfficialNews');
+  assert.equal(liveLinks.payoutChannelUrl, 'https://t.me/AdminPayoutOverride');
+  assert.equal(liveLinks.giftCodeChannelUrl, 'https://t.me/LiveGiftCodes');
+
+  const merged = mergeTaskDefinitions([], liveLinks);
+  const byId = new Map(merged.map((t) => [t.id, t]));
+
+  assert.equal(byId.get('daily_news')?.actionUrl, 'https://t.me/LiveOfficialNews');
+  assert.equal(byId.get('milestone_join_news')?.actionUrl, 'https://t.me/LiveOfficialNews');
+  assert.equal(byId.get('daily_payments')?.actionUrl, 'https://t.me/AdminPayoutOverride');
+  assert.equal(byId.get('milestone_join_pay')?.actionUrl, 'https://t.me/AdminPayoutOverride');
+  assert.equal(byId.get('daily_promos')?.actionUrl, 'https://t.me/LiveGiftCodes');
+
+  assert.equal(getTaskChannelCheckMode(byId.get('daily_news')!), 'strict');
+  assert.equal(getTaskChannelCheckMode(byId.get('daily_payments')!), 'strict');
+  assert.equal(getTaskChannelCheckMode(byId.get('daily_promos')!), 'strict');
+
+  const verifiable = getVerifiableClaimedChannelTasks(
+    ['daily_news', 'daily_payments', 'daily_promos'],
+    [],
+    liveLinks,
+  );
+  assert.deepEqual(
+    verifiable.map((v) => [v.task.id, v.handle]),
+    [
+      ['daily_news', '@LiveOfficialNews'],
+      ['daily_payments', '@AdminPayoutOverride'],
+      ['daily_promos', '@LiveGiftCodes'],
+    ],
+  );
+});
+
+test('resolveLiveTaskChannelLinks falls back to requiredChannels payout and official links when overrides are omitted', () => {
+  const liveLinks = resolveLiveTaskChannelLinks({
+    requiredChannels: [
+      {
+        id: 'official_news',
+        handle: '@FreshOfficial',
+        title: 'Fresh Official',
+        description: 'Official announcements',
+        url: 'https://t.me/FreshOfficial',
+        enabled: true,
+      },
+      {
+        id: 'payout_feed',
+        handle: '@FreshPayouts',
+        title: 'Fresh Payouts',
+        description: 'Withdrawal proofs',
+        url: 'https://t.me/FreshPayouts',
+        enabled: true,
+      },
+    ],
+  });
+
+  assert.equal(liveLinks.officialChannelUrl, 'https://t.me/FreshOfficial');
+  assert.equal(liveLinks.payoutChannelUrl, 'https://t.me/FreshPayouts');
+  assert.equal(liveLinks.giftCodeChannelUrl, 'https://t.me/FreshOfficial');
+
+  const merged = mergeTaskDefinitions([], liveLinks);
+  const byId = new Map(merged.map((t) => [t.id, t]));
+  assert.equal(byId.get('daily_payments')?.actionUrl, 'https://t.me/FreshPayouts');
+  assert.equal(byId.get('milestone_join_pay')?.actionUrl, 'https://t.me/FreshPayouts');
+  assert.equal(byId.get('daily_news')?.actionUrl, 'https://t.me/FreshOfficial');
+  assert.equal(byId.get('daily_promos')?.actionUrl, 'https://t.me/FreshOfficial');
+});

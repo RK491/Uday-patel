@@ -76,7 +76,11 @@ export function FriendsView({
   botUsername,
   appShortName,
 }: FriendsViewProps) {
-  const effectiveReferReward = Math.max(0, Math.floor(Number(perReferRewardCoins) ?? REFERRER_SIGNUP_BONUS_COINS));
+  const numericReferReward = Number(perReferRewardCoins);
+  const effectiveReferReward = Math.max(
+    0,
+    Math.floor(Number.isFinite(numericReferReward) ? numericReferReward : REFERRER_SIGNUP_BONUS_COINS),
+  );
   const [feedback, setFeedback] = useState<'shared' | 'copied-link' | 'copied-pitch' | 'error' | null>(null);
   const [isSharing, setIsSharing] = useState(false);
   const [heroImgFailed, setHeroImgFailed] = useState(false);
@@ -344,7 +348,7 @@ export function FriendsView({
         </div>
 
         <div className="clay-inset p-2.5 h-44 w-full min-w-0" aria-label="Referral Growth chart over the last 7 days">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={160}>
             <AreaChart data={referralGrowthSeries} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
               <defs>
                 <linearGradient id="referralGrowthFill" x1="0" y1="0" x2="0" y2="1">

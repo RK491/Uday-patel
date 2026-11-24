@@ -248,7 +248,7 @@ export function WalletView({
         </div>
 
         <div className="clay-inset p-2.5 h-44 w-full min-w-0" aria-label="7-day earnings analytics chart">
-          <ResponsiveContainer width="100%" height="100%">
+          <ResponsiveContainer width="100%" height="100%" minWidth={0} minHeight={160}>
             <BarChart data={earningsSeries} margin={{ top: 8, right: 8, left: -14, bottom: 0 }}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#94A3B8" strokeOpacity={0.22} />
               <XAxis

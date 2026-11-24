@@ -526,9 +526,105 @@ export const DEFAULT_AD_CONFIG: AdConfig = {
   updatedAtMs: 0,
 };
 
-export function mergeTaskDefinitions(customTasks: TaskDefinition[] = []): TaskDefinition[] {
+export interface LiveTaskChannelLinks {
+  officialChannelUrl?: string;
+  payoutChannelUrl?: string;
+  giftCodeChannelUrl?: string;
+}
+
+const DEFAULT_OFFICIAL_CHANNEL_URL = 'https://t.me/AIRDROP_GALAXYS';
+const DEFAULT_PAYOUT_CHANNEL_URL = 'https://t.me/AG_PAYOUTS';
+
+const GIFT_CODE_CHANNEL_TASK_IDS = new Set(['daily_promos']);
+const PAYOUT_CHANNEL_TASK_IDS = new Set([
+  'daily_payments',
+  'milestone_join_pay',
+  'exclusive_ton_wallet',
+  'partner_boost',
+]);
+const OFFICIAL_CHANNEL_TASK_IDS = new Set([
+  'daily_news',
+  'milestone_react',
+  'milestone_join_news',
+  'social_share_farm',
+  'partner_app',
+  'partner_galaxy',
+]);
+
+function pickVerifiableChannelUrl(candidate?: string): string {
+  const trimmed = String(candidate || '').trim();
+  if (!trimmed) return '';
+  if (/[?&]start(app)?=/i.test(trimmed)) return '';
+  const norm = normalizeTelegramChannelHandle(trimmed);
+  if (norm.url) return norm.url;
+  if (/^https?:\/\/(?:t\.me|telegram\.me)\/(\+[a-zA-Z0-9_-]+|joinchat\/[a-zA-Z0-9_-]+)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return '';
+}
+
+export function resolveLiveTaskChannelLinks(params?: {
+  requiredChannels?: RequiredTelegramChannel[];
+  payoutChannelUrl?: string;
+  getCodeChannelUrl?: string;
+}): LiveTaskChannelLinks {
+  const active = (params?.requiredChannels ?? []).filter(
+    (ch) => ch && ch.enabled !== false && Boolean(ch.url || ch.handle),
+  );
+  const directPayout = pickVerifiableChannelUrl(params?.payoutChannelUrl);
+  const payoutFromRequired = active.find((ch) =>
+    /payout|pay/i.test(`${ch.id} ${ch.handle} ${ch.title}`),
+  );
+  const payoutChannelUrl =
+    directPayout ||
+    pickVerifiableChannelUrl(payoutFromRequired?.url || payoutFromRequired?.handle) ||
+    DEFAULT_PAYOUT_CHANNEL_URL;
+  const payoutHandleLower = normalizeTelegramChannelHandle(payoutChannelUrl).handle.toLowerCase();
+
+  const officialFromRequired =
+    active.find((ch) => {
+      const url = pickVerifiableChannelUrl(ch.url || ch.handle);
+      if (!url) return false;
+      const handleLower = normalizeTelegramChannelHandle(url).handle.toLowerCase();
+      return !payoutHandleLower || handleLower !== payoutHandleLower;
+    }) || active[0];
+  const officialChannelUrl =
+    pickVerifiableChannelUrl(officialFromRequired?.url || officialFromRequired?.handle) ||
+    DEFAULT_OFFICIAL_CHANNEL_URL;
+
+  const giftCodeChannelUrl =
+    pickVerifiableChannelUrl(params?.getCodeChannelUrl) || officialChannelUrl;
+
+  return {
+    officialChannelUrl,
+    payoutChannelUrl,
+    giftCodeChannelUrl,
+  };
+}
+
+export function mergeTaskDefinitions(
+  customTasks: TaskDefinition[] = [],
+  liveLinks?: LiveTaskChannelLinks,
+): TaskDefinition[] {
   const activeCustom = customTasks.filter((t) => t.isActive !== false);
-  return [...TASK_DEFINITIONS, ...activeCustom];
+  const defaults = liveLinks
+    ? TASK_DEFINITIONS.map((task) => {
+        let nextUrl = task.actionUrl;
+        if (GIFT_CODE_CHANNEL_TASK_IDS.has(task.id) && liveLinks.giftCodeChannelUrl) {
+          nextUrl = liveLinks.giftCodeChannelUrl;
+        } else if (PAYOUT_CHANNEL_TASK_IDS.has(task.id) && liveLinks.payoutChannelUrl) {
+          nextUrl = liveLinks.payoutChannelUrl;
+        } else if (OFFICIAL_CHANNEL_TASK_IDS.has(task.id) && liveLinks.officialChannelUrl) {
+          nextUrl = liveLinks.officialChannelUrl;
+        }
+        if (nextUrl === task.actionUrl) return task;
+        return {
+          ...task,
+          actionUrl: nextUrl,
+        };
+      })
+    : TASK_DEFINITIONS;
+  return [...defaults, ...activeCustom];
 }
 
 export function getTaskRemainingSlots(
@@ -1535,8 +1631,9 @@ export function completeTask(
   taskId: string,
   nowMs: number,
   customTasks: TaskDefinition[] = [],
+  liveLinks?: LiveTaskChannelLinks,
 ): { profile: UserFarmProfile; transaction: TransactionEntry; rewardCoins: number; isCustomTask: boolean } | { error: string } {
-  const allTasks = mergeTaskDefinitions(customTasks);
+  const allTasks = mergeTaskDefinitions(customTasks, liveLinks);
   const task = allTasks.find((t) => t.id === taskId);
   if (!task) {
     return { error: 'Task not found.' };
@@ -4687,12 +4784,13 @@ export function renderPayoutChannelApproveMessage(params: {
 export function getVerifiableClaimedChannelTasks(
   completedTaskIds: string[],
   customTasks: TaskDefinition[] = [],
+  liveLinks?: LiveTaskChannelLinks,
 ): Array<{ task: TaskDefinition; handle: string }> {
   if (!Array.isArray(completedTaskIds) || completedTaskIds.length === 0) {
     return [];
   }
   const completedSet = new Set(completedTaskIds);
-  const allTasks = mergeTaskDefinitions(customTasks);
+  const allTasks = mergeTaskDefinitions(customTasks, liveLinks);
   const out: Array<{ task: TaskDefinition; handle: string }> = [];
   for (const task of allTasks) {
     if (!completedSet.has(task.id)) continue;
@@ -4716,6 +4814,7 @@ export function applyLeftChannelPenalties(
   leftTaskIds: string[],
   nowMs: number,
   customTasks: TaskDefinition[] = [],
+  liveLinks?: LiveTaskChannelLinks,
 ): {
   profile: UserFarmProfile;
   transaction: TransactionEntry;
@@ -4724,7 +4823,7 @@ export function applyLeftChannelPenalties(
 } | null {
   if (!Array.isArray(leftTaskIds) || leftTaskIds.length === 0) return null;
   const completedSet = new Set(profile.completedTaskIds);
-  const allTasks = mergeTaskDefinitions(customTasks);
+  const allTasks = mergeTaskDefinitions(customTasks, liveLinks);
   const taskMap = new Map(allTasks.map((t) => [t.id, t]));
   const penalizedSet = new Set<string>();
   const penalizedTasks: Array<{
