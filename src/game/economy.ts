@@ -17,8 +17,12 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   EconomyConfig,
+  IncubatorCurrency,
+  IncubatorState,
+  IncubatorTierId,
   LeaderboardEntry,
   MaintenanceConfig,
+  MeadowCritterKind,
   PromoRewardType,
   ReferralRecord,
   ReinvestSurgeConfig,
@@ -2563,6 +2567,10 @@ export function createDefaultProfile(
     goldenEggsFound: 0,
     claimedAchievementIds: [],
     claimedReferralMilestones: [],
+    incubatorState: null,
+    incubatorHatchedCount: 0,
+    lastCritterEventAtMs: 0,
+    critterChasedCount: 0,
   };
 
   const transactions: TransactionEntry[] = [
@@ -3452,6 +3460,9 @@ const AUTO_HARVEST_UNTIL_PREFIX = '__ah_u:';
 const TG_REMINDERS_PREFIX = '__tgr:';
 const REINVEST_DATE_PREFIX = '__reinv:';
 const RESET_EPOCH_PREFIX = '__rst:';
+const INCUBATOR_STATE_PREFIX = '__inc_s:';
+const INCUBATOR_COUNT_PREFIX = '__inc_c:';
+const CRITTER_EVENT_PREFIX = '__cr_t:';
 const TASK_META_PREFIX = '__m:';
 const TASK_SUBTITLE_MAX_LEN = 120;
 
@@ -3463,7 +3474,24 @@ export interface AchievementTokenExtras {
   autoHarvestUntilMs?: number;
   telegramRemindersEnabled?: boolean;
   lastReinvestDate?: string;
+  incubatorState?: IncubatorState | null;
+  incubatorHatchedCount?: number;
+  lastCritterEventAtMs?: number;
+  critterChasedCount?: number;
   resetEpochMs?: number;
+}
+
+function encodeIncubatorTierShort(tierId: IncubatorTierId): string {
+  if (tierId === 'straw') return 's';
+  if (tierId === 'golden') return 'g';
+  return 'r';
+}
+
+function decodeIncubatorTierToken(raw: string): IncubatorTierId | null {
+  if (raw === 's' || raw === 'straw') return 'straw';
+  if (raw === 'g' || raw === 'golden') return 'golden';
+  if (raw === 'r' || raw === 'royal') return 'royal';
+  return null;
 }
 
 function isInternalAchievementStateToken(id: string): boolean {
@@ -3476,7 +3504,10 @@ function isInternalAchievementStateToken(id: string): boolean {
     id.startsWith(AUTO_HARVEST_UNTIL_PREFIX) ||
     id.startsWith(TG_REMINDERS_PREFIX) ||
     id.startsWith(REINVEST_DATE_PREFIX) ||
-    id.startsWith(RESET_EPOCH_PREFIX)
+    id.startsWith(RESET_EPOCH_PREFIX) ||
+    id.startsWith(INCUBATOR_STATE_PREFIX) ||
+    id.startsWith(INCUBATOR_COUNT_PREFIX) ||
+    id.startsWith(CRITTER_EVENT_PREFIX)
   );
 }
 
@@ -3532,6 +3563,30 @@ export function encodeAchievementsWithAds(
   if (rstEpoch > 0) {
     stateTokens.push(`${RESET_EPOCH_PREFIX}${rstEpoch}`);
   }
+  if (extras.incubatorState && decodeIncubatorTierToken(extras.incubatorState.tierId)) {
+    const inc = extras.incubatorState;
+    const tShort = encodeIncubatorTierShort(inc.tierId);
+    const sAt = Math.max(0, Math.floor(Number(inc.startedAtMs) || 0));
+    const rAt = Math.max(sAt, Math.floor(Number(inc.readyAtMs) || 0));
+    const sp = Math.max(0, Math.min(9, Math.floor(Number(inc.speedupsUsed) || 0)));
+    const curShort = inc.currency === 'coins' ? 'c' : 'e';
+    const token = `${INCUBATOR_STATE_PREFIX}${tShort}:${sAt}:${rAt}:${sp}:${curShort}`;
+    if (token.length <= 64) {
+      stateTokens.push(token);
+    }
+  }
+  const incCount = Math.max(0, Math.floor(Number(extras.incubatorHatchedCount ?? 0) || 0));
+  if (incCount > 0) {
+    stateTokens.push(`${INCUBATOR_COUNT_PREFIX}${incCount}`);
+  }
+  const crAt = Math.max(0, Math.floor(Number(extras.lastCritterEventAtMs ?? 0) || 0));
+  const crCount = Math.max(0, Math.floor(Number(extras.critterChasedCount ?? 0) || 0));
+  if (crAt > 0 || crCount > 0) {
+    const crToken = `${CRITTER_EVENT_PREFIX}${crAt}:${crCount}`;
+    if (crToken.length <= 64) {
+      stateTokens.push(crToken);
+    }
+  }
 
   const maxRealIds = Math.max(0, 50 - stateTokens.length);
   return [...cleanIds.slice(-maxRealIds), ...stateTokens];
@@ -3552,6 +3607,10 @@ export function decodeAchievementsAndAds(
   autoHarvestUntilMs: number;
   telegramRemindersEnabled: boolean;
   lastReinvestDate: string;
+  incubatorState: IncubatorState | null;
+  incubatorHatchedCount: number;
+  lastCritterEventAtMs: number;
+  critterChasedCount: number;
   resetEpochMs: number;
 } {
   const arr = Array.isArray(rawClaimedIds) ? rawClaimedIds : [];
@@ -3566,6 +3625,10 @@ export function decodeAchievementsAndAds(
   let tokenAhUntil = 0;
   let tokenTgReminders: boolean | undefined = undefined;
   let tokenReinvDate = '';
+  let tokenIncubatorState: IncubatorState | null = null;
+  let tokenIncubatorHatchedCount = 0;
+  let tokenCritterAtMs = 0;
+  let tokenCritterChasedCount = 0;
   let tokenResetEpoch = 0;
 
   for (const item of arr) {
@@ -3634,6 +3697,39 @@ export function decodeAchievementsAndAds(
       }
       continue;
     }
+    if (str.startsWith(INCUBATOR_STATE_PREFIX)) {
+      const parts = str.slice(INCUBATOR_STATE_PREFIX.length).split(':');
+      const tierId = decodeIncubatorTierToken(parts[0] || '');
+      const startedAtMs = Math.max(0, Math.floor(Number(parts[1] ?? 0) || 0));
+      const readyAtMs = Math.max(startedAtMs, Math.floor(Number(parts[2] ?? 0) || 0));
+      const speedupsUsed = Math.max(0, Math.min(9, Math.floor(Number(parts[3] ?? 0) || 0)));
+      const currency: IncubatorCurrency = parts[4] === 'c' ? 'coins' : 'eggs';
+      if (tierId && startedAtMs > 0) {
+        tokenIncubatorState = {
+          tierId,
+          startedAtMs,
+          readyAtMs,
+          speedupsUsed,
+          currency,
+        };
+      }
+      continue;
+    }
+    if (str.startsWith(INCUBATOR_COUNT_PREFIX)) {
+      const parsed = Math.floor(Number(str.slice(INCUBATOR_COUNT_PREFIX.length)));
+      if (Number.isFinite(parsed) && parsed > tokenIncubatorHatchedCount) {
+        tokenIncubatorHatchedCount = parsed;
+      }
+      continue;
+    }
+    if (str.startsWith(CRITTER_EVENT_PREFIX)) {
+      const parts = str.slice(CRITTER_EVENT_PREFIX.length).split(':');
+      const parsedAt = Math.max(0, Math.floor(Number(parts[0] ?? 0) || 0));
+      const parsedCount = Math.max(0, Math.floor(Number(parts[1] ?? 0) || 0));
+      if (parsedAt > tokenCritterAtMs) tokenCritterAtMs = parsedAt;
+      if (parsedCount > tokenCritterChasedCount) tokenCritterChasedCount = parsedCount;
+      continue;
+    }
     if (!seen.has(str)) {
       seen.add(str);
       cleanIds.push(str);
@@ -3648,6 +3744,18 @@ export function decodeAchievementsAndAds(
   const explicitCfAds = Math.max(0, Math.floor(Number(explicitExtras.coopFeverAdsWatched ?? 0) || 0));
   const explicitAhUntil = Math.max(0, Math.floor(Number(explicitExtras.autoHarvestUntilMs ?? 0) || 0));
   const explicitReinvDate = String(explicitExtras.lastReinvestDate || '').trim();
+  const explicitIncCount = Math.max(
+    0,
+    Math.floor(Number(explicitExtras.incubatorHatchedCount ?? 0) || 0),
+  );
+  const explicitCrAt = Math.max(
+    0,
+    Math.floor(Number(explicitExtras.lastCritterEventAtMs ?? 0) || 0),
+  );
+  const explicitCrCount = Math.max(
+    0,
+    Math.floor(Number(explicitExtras.critterChasedCount ?? 0) || 0),
+  );
   const explicitResetEpoch = Math.max(0, Math.floor(Number(explicitExtras.resetEpochMs ?? 0) || 0));
 
   return {
@@ -3664,6 +3772,13 @@ export function decodeAchievementsAndAds(
         : (tokenTgReminders ?? true),
     lastReinvestDate:
       explicitReinvDate > tokenReinvDate ? explicitReinvDate : tokenReinvDate,
+    incubatorState:
+      explicitExtras.incubatorState !== undefined
+        ? explicitExtras.incubatorState
+        : tokenIncubatorState,
+    incubatorHatchedCount: Math.max(tokenIncubatorHatchedCount, explicitIncCount),
+    lastCritterEventAtMs: Math.max(tokenCritterAtMs, explicitCrAt),
+    critterChasedCount: Math.max(tokenCritterChasedCount, explicitCrCount),
     resetEpochMs: Math.max(tokenResetEpoch, explicitResetEpoch),
   };
 }
@@ -5317,6 +5432,471 @@ export function resolveMaintenanceConfig(
     updatedAtMs: Number.isFinite(updatedAtMs) && updatedAtMs >= 0 ? updatedAtMs : 0,
   };
 }
+
+// ============================================================================
+// Egg Incubator / Hatchery Economy
+// ============================================================================
+
+export const INCUBATOR_MAX_AD_SPEEDUPS = 2;
+export const INCUBATOR_AD_SPEEDUP_RATIO = 0.5;
+export const INCUBATOR_AD_MIN_REDUCTION_MS = 15 * 60 * 1000; // 15 minutes
+
+export interface IncubatorOutcomeOption {
+  breed: ChickenBreedId;
+  chancePct: number;
+}
+
+export interface IncubatorTier {
+  id: IncubatorTierId;
+  name: string;
+  shortLabel: string;
+  durationHours: number;
+  durationMs: number;
+  eggCost: number;
+  coinCost: number;
+  badge: string;
+  tagline: string;
+  outcomes: IncubatorOutcomeOption[];
+}
+
+export const INCUBATOR_TIERS: IncubatorTier[] = [
+  {
+    id: 'straw',
+    name: 'Warm Straw Nest',
+    shortLabel: '4h Nest',
+    durationHours: 4,
+    durationMs: 4 * 3_600_000,
+    eggCost: 12_000,
+    coinCost: 900,
+    badge: 'Starter',
+    tagline: 'Cozy starter nest · chance for Rhode Island Red',
+    outcomes: [
+      { breed: 'leghorn', chancePct: 85 },
+      { breed: 'rhode', chancePct: 15 },
+    ],
+  },
+  {
+    id: 'golden',
+    name: 'Golden Hearth Nest',
+    shortLabel: '8h Nest',
+    durationHours: 8,
+    durationMs: 8 * 3_600_000,
+    eggCost: 35_000,
+    coinCost: 2_650,
+    badge: 'Popular',
+    tagline: 'Heated hearth nest · chance for Buff Orpington',
+    outcomes: [
+      { breed: 'rhode', chancePct: 82 },
+      { breed: 'orpington', chancePct: 18 },
+    ],
+  },
+  {
+    id: 'royal',
+    name: 'Royal Emerald Nest',
+    shortLabel: '12h Nest',
+    durationHours: 12,
+    durationMs: 12 * 3_600_000,
+    eggCost: 110_000,
+    coinCost: 8_800,
+    badge: 'Rare Australorp',
+    tagline: 'Premium royal nest · chance for champion Australorp',
+    outcomes: [
+      { breed: 'orpington', chancePct: 85 },
+      { breed: 'australorp', chancePct: 15 },
+    ],
+  },
+];
+
+export function getIncubatorTier(tierId: IncubatorTierId): IncubatorTier {
+  const found = INCUBATOR_TIERS.find((t) => t.id === tierId);
+  if (!found) {
+    throw new Error(`Unknown incubator tier: ${tierId}`);
+  }
+  return found;
+}
+
+export interface IncubatorStatus {
+  status: 'idle' | 'incubating' | 'ready';
+  hasActive: boolean;
+  state: IncubatorState | null;
+  tier: IncubatorTier | null;
+  remainingMs: number;
+  totalDurationMs: number;
+  progressPct: number;
+  speedupsUsed: number;
+  maxSpeedups: number;
+  canSpeedUpWithAd: boolean;
+  nextAdSavedMs: number;
+  hatchedCount: number;
+}
+
+export function getIncubatorStatus(
+  profile: Partial<Pick<UserFarmProfile, 'incubatorState' | 'incubatorHatchedCount'>>,
+  nowMs = Date.now(),
+): IncubatorStatus {
+  const hatchedCount = Math.max(0, Math.floor(Number(profile.incubatorHatchedCount ?? 0) || 0));
+  const rawState = profile.incubatorState ?? null;
+  if (!rawState || !decodeIncubatorTierToken(rawState.tierId)) {
+    return {
+      status: 'idle',
+      hasActive: false,
+      state: null,
+      tier: null,
+      remainingMs: 0,
+      totalDurationMs: 0,
+      progressPct: 0,
+      speedupsUsed: 0,
+      maxSpeedups: INCUBATOR_MAX_AD_SPEEDUPS,
+      canSpeedUpWithAd: false,
+      nextAdSavedMs: 0,
+      hatchedCount,
+    };
+  }
+
+  const tier = getIncubatorTier(rawState.tierId);
+  const safeNow = Math.max(0, Number.isFinite(nowMs) ? nowMs : Date.now());
+  const startedAtMs = Math.max(0, Math.floor(Number(rawState.startedAtMs) || 0));
+  const readyAtMs = Math.max(startedAtMs, Math.floor(Number(rawState.readyAtMs) || 0));
+  const speedupsUsed = Math.max(0, Math.floor(Number(rawState.speedupsUsed) || 0));
+  const remainingMs = Math.max(0, readyAtMs - safeNow);
+  const totalDurationMs = Math.max(1, readyAtMs - startedAtMs);
+  const status: 'incubating' | 'ready' = remainingMs <= 0 ? 'ready' : 'incubating';
+  const progressPct =
+    status === 'ready'
+      ? 100
+      : Math.max(2, Math.min(99, Math.round(((safeNow - startedAtMs) / totalDurationMs) * 100)));
+  const canSpeedUpWithAd =
+    status === 'incubating' && speedupsUsed < INCUBATOR_MAX_AD_SPEEDUPS;
+  const nextAdSavedMs = canSpeedUpWithAd
+    ? Math.min(
+        remainingMs,
+        Math.max(INCUBATOR_AD_MIN_REDUCTION_MS, Math.round(remainingMs * INCUBATOR_AD_SPEEDUP_RATIO)),
+      )
+    : 0;
+
+  return {
+    status,
+    hasActive: true,
+    state: {
+      tierId: tier.id,
+      startedAtMs,
+      readyAtMs,
+      speedupsUsed,
+      currency: rawState.currency ?? 'eggs',
+    },
+    tier,
+    remainingMs,
+    totalDurationMs,
+    progressPct,
+    speedupsUsed,
+    maxSpeedups: INCUBATOR_MAX_AD_SPEEDUPS,
+    canSpeedUpWithAd,
+    nextAdSavedMs,
+    hatchedCount,
+  };
+}
+
+export function startIncubation(
+  profile: UserFarmProfile,
+  tierId: IncubatorTierId,
+  currency: IncubatorCurrency,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      tier: IncubatorTier;
+    }
+  | { error: string } {
+  const currentStatus = getIncubatorStatus(profile, nowMs);
+  if (currentStatus.hasActive) {
+    return {
+      error:
+        currentStatus.status === 'ready'
+          ? 'Your hatched chick is waiting! Claim it before starting a new egg.'
+          : 'An egg is already incubating in your nest!',
+    };
+  }
+
+  const tier = getIncubatorTier(tierId);
+  const cost = currency === 'coins' ? tier.coinCost : tier.eggCost;
+  const available = currency === 'coins' ? profile.coins : profile.eggs;
+
+  if (available < cost) {
+    return {
+      error:
+        currency === 'coins'
+          ? `Need ${cost.toLocaleString()} coins for ${tier.name} (you have ${available.toLocaleString()}).`
+          : `Need ${cost.toLocaleString()} eggs for ${tier.name} (you have ${Math.floor(available).toLocaleString()}).`,
+    };
+  }
+
+  const nextState: IncubatorState = {
+    tierId: tier.id,
+    startedAtMs: nowMs,
+    readyAtMs: nowMs + tier.durationMs,
+    speedupsUsed: 0,
+    currency,
+  };
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: currency === 'coins' ? profile.coins - cost : profile.coins,
+    eggs: currency === 'eggs' ? profile.eggs - cost : profile.eggs,
+    incubatorState: nextState,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_inc_start_${tier.id}_${nowMs}`,
+    userId: profile.uid,
+    type: 'booster',
+    title: `Incubator: ${tier.name}`.slice(0, 80),
+    amount: -cost,
+    currency,
+    usdValue: currency === 'coins' ? coinsToUsd(cost) : eggsToUsd(cost),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return { profile: nextProfile, transaction, tier };
+}
+
+export function speedUpIncubationWithAd(
+  profile: UserFarmProfile,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      savedMs: number;
+      remainingMs: number;
+      isNowReady: boolean;
+      tier: IncubatorTier;
+    }
+  | { error: string } {
+  const status = getIncubatorStatus(profile, nowMs);
+  if (!status.hasActive || !status.state || !status.tier) {
+    return { error: 'No egg is currently incubating.' };
+  }
+  if (status.status === 'ready') {
+    return { error: 'Your egg is already ready to hatch!' };
+  }
+  if (!status.canSpeedUpWithAd) {
+    return {
+      error: `Maximum ${INCUBATOR_MAX_AD_SPEEDUPS} Ad Speed-Ups already used on this egg.`,
+    };
+  }
+
+  const savedMs = status.nextAdSavedMs;
+  const nextReadyAtMs = Math.max(nowMs, status.state.readyAtMs - savedMs);
+  const remainingMs = Math.max(0, nextReadyAtMs - nowMs);
+  const nextState: IncubatorState = {
+    ...status.state,
+    readyAtMs: nextReadyAtMs,
+    speedupsUsed: status.state.speedupsUsed + 1,
+  };
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    incubatorState: nextState,
+    totalAdsWatched: getTotalAdsWatched(profile) + 1,
+  };
+
+  return {
+    profile: nextProfile,
+    savedMs,
+    remainingMs,
+    isNowReady: remainingMs <= 0,
+    tier: status.tier,
+  };
+}
+
+function pickIncubatorOutcomeBreed(tier: IncubatorTier, rollValue: number): ChickenBreedId {
+  const safeRoll = Number.isFinite(rollValue)
+    ? Math.max(0, Math.min(0.999999, rollValue))
+    : Math.random();
+  const totalWeight = tier.outcomes.reduce((sum, item) => sum + item.chancePct, 0);
+  let cursor = safeRoll * totalWeight;
+  for (const option of tier.outcomes) {
+    cursor -= option.chancePct;
+    if (cursor < 0) {
+      return option.breed;
+    }
+  }
+  return tier.outcomes[tier.outcomes.length - 1].breed;
+}
+
+export function claimIncubatedEgg(
+  profile: UserFarmProfile,
+  nowMs: number,
+  rollValue = Math.random(),
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      hatchedBreed: ChickenBreedId;
+      pack: ChickenPack;
+      xpGained: number;
+      shouldActivateReferral: boolean;
+      tier: IncubatorTier;
+    }
+  | { error: string } {
+  const status = getIncubatorStatus(profile, nowMs);
+  if (!status.hasActive || !status.state || !status.tier) {
+    return { error: 'No egg in the incubator yet.' };
+  }
+  if (status.status !== 'ready') {
+    return { error: 'Egg is still warming up! Wait for the hatch timer or speed it up.' };
+  }
+
+  const hatchedBreed = pickIncubatorOutcomeBreed(status.tier, rollValue);
+  const pack = getChickenPack(hatchedBreed);
+  const xpGained = Math.max(5, pack.leaderboardPoints * 3);
+  const { level, xp } = addXp(profile.level, profile.xp, xpGained);
+  const shouldActivateReferral = Boolean(profile.referredBy && !profile.referralActivated);
+  const hadNoChickens = calculateTotalChickens(profile) === 0;
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    leghornCount: profile.leghornCount + (hatchedBreed === 'leghorn' ? 1 : 0),
+    rhodeCount: profile.rhodeCount + (hatchedBreed === 'rhode' ? 1 : 0),
+    orpingtonCount: profile.orpingtonCount + (hatchedBreed === 'orpington' ? 1 : 0),
+    australorpCount: profile.australorpCount + (hatchedBreed === 'australorp' ? 1 : 0),
+    boughtThisWeek: profile.boughtThisWeek + 1,
+    referralActivated: true,
+    lastCollectedAt: hadNoChickens ? nowMs : profile.lastCollectedAt,
+    level,
+    xp,
+    incubatorState: null,
+    incubatorHatchedCount: status.hatchedCount + 1,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_hatch_${hatchedBreed}_${nowMs}`,
+    userId: profile.uid,
+    type: 'buy_chicken',
+    title: `Hatched 1x ${pack.name}`.slice(0, 80),
+    amount: 0,
+    currency: 'coins',
+    usdValue: pack.usdCost,
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    hatchedBreed,
+    pack,
+    xpGained,
+    shouldActivateReferral,
+    tier: status.tier,
+  };
+}
+
+// ============================================================================
+// Fox / Crow Meadow Mini-Event (Ads Integrated)
+// ============================================================================
+
+export const CRITTER_EVENT_COOLDOWN_MS = 15 * 60 * 1000; // 15 minutes
+
+export const CRITTER_EVENT_REWARDS: Record<
+  MeadowCritterKind,
+  { name: string; actionLabel: string; coins: number; xp: number }
+> = {
+  fox: {
+    name: 'Sneaky Red Fox',
+    actionLabel: 'Chased Sneaky Fox',
+    coins: 50,
+    xp: 12,
+  },
+  crow: {
+    name: 'Farmyard Crow',
+    actionLabel: 'Shooed Farmyard Crow',
+    coins: 35,
+    xp: 8,
+  },
+};
+
+export interface CritterEventStatus {
+  ready: boolean;
+  remainingMs: number;
+  lastEventAtMs: number;
+  chasedCount: number;
+}
+
+export function getCritterEventStatus(
+  profile: Partial<Pick<UserFarmProfile, 'lastCritterEventAtMs' | 'critterChasedCount'>>,
+  nowMs = Date.now(),
+): CritterEventStatus {
+  const lastEventAtMs = Math.max(0, Math.floor(Number(profile.lastCritterEventAtMs ?? 0) || 0));
+  const chasedCount = Math.max(0, Math.floor(Number(profile.critterChasedCount ?? 0) || 0));
+  const safeNow = Math.max(0, Number.isFinite(nowMs) ? nowMs : Date.now());
+  const elapsed = Math.max(0, safeNow - lastEventAtMs);
+  const remainingMs = lastEventAtMs === 0 ? 0 : Math.max(0, CRITTER_EVENT_COOLDOWN_MS - elapsed);
+  return {
+    ready: remainingMs <= 0,
+    remainingMs,
+    lastEventAtMs,
+    chasedCount,
+  };
+}
+
+export function claimCritterReward(
+  profile: UserFarmProfile,
+  critter: MeadowCritterKind,
+  nowMs: number,
+):
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      coinsAwarded: number;
+      xpAwarded: number;
+      critterName: string;
+    }
+  | { error: string } {
+  const status = getCritterEventStatus(profile, nowMs);
+  if (!status.ready) {
+    const mins = Math.max(1, Math.ceil(status.remainingMs / 60_000));
+    return {
+      error: `Meadow is safe! Next Fox/Crow patrol check in ${mins}m.`,
+    };
+  }
+
+  const reward = CRITTER_EVENT_REWARDS[critter] ?? CRITTER_EVENT_REWARDS.fox;
+  const { level, xp } = addXp(profile.level, profile.xp, reward.xp);
+
+  const nextProfile: UserFarmProfile = {
+    ...profile,
+    coins: profile.coins + reward.coins,
+    level,
+    xp,
+    lastCritterEventAtMs: nowMs,
+    critterChasedCount: status.chasedCount + 1,
+    totalAdsWatched: getTotalAdsWatched(profile) + 1,
+  };
+
+  const transaction: TransactionEntry = {
+    id: `tx_critter_${critter}_${nowMs}`,
+    userId: profile.uid,
+    type: 'task',
+    title: `${reward.actionLabel} (+${reward.coins} Coins)`.slice(0, 80),
+    amount: reward.coins,
+    currency: 'coins',
+    usdValue: coinsToUsd(reward.coins),
+    status: 'completed',
+    createdAtMs: nowMs,
+  };
+
+  return {
+    profile: nextProfile,
+    transaction,
+    coinsAwarded: reward.coins,
+    xpAwarded: reward.xp,
+    critterName: reward.name,
+  };
+}
+
+
 
 
 

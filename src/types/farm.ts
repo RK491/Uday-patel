@@ -36,6 +36,18 @@ export type TransactionType =
 
 export type AutoHarvestDurationId = '5h' | '10h' | '15h' | '20h' | '24h' | '7d';
 export type AutoHarvestCurrency = 'coins' | 'eggs';
+export type IncubatorTierId = 'straw' | 'golden' | 'royal';
+export type IncubatorCurrency = 'eggs' | 'coins';
+export type MeadowCritterKind = 'fox' | 'crow';
+
+export interface IncubatorState {
+  tierId: IncubatorTierId;
+  startedAtMs: number;
+  readyAtMs: number;
+  speedupsUsed: number;
+  currency?: IncubatorCurrency;
+}
+
 export type BroadcastMediaType = 'none' | 'photo' | 'video' | 'animation';
 
 export interface ChickenPack {
@@ -96,6 +108,10 @@ export interface UserFarmProfile {
   goldenEggsFound?: number;
   claimedAchievementIds?: string[];
   claimedReferralMilestones?: number[];
+  incubatorState?: IncubatorState | null;
+  incubatorHatchedCount?: number;
+  lastCritterEventAtMs?: number;
+  critterChasedCount?: number;
   resetEpochMs?: number;
 }
 

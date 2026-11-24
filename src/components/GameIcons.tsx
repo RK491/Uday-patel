@@ -14,6 +14,8 @@ import type {
   AchievementIconKey,
   AchievementTier,
   ChickenBreedId,
+  IncubatorTierId,
+  MeadowCritterKind,
   ShowcaseBadge,
 } from '../types/farm';
 
@@ -426,3 +428,161 @@ export function AchievementBadgeEmblem({
     </span>
   );
 }
+
+/**
+ * Hand-crafted cel-shaded Anime Fox & Crow mini-event sprites matching ChickenSprite ink lineart.
+ */
+export function CritterSprite({
+  kind,
+  className = 'w-14 h-14',
+  facingLeft = false,
+}: {
+  kind: MeadowCritterKind;
+  className?: string;
+  facingLeft?: boolean;
+}) {
+  if (kind === 'fox') {
+    return (
+      <svg
+        viewBox="0 0 64 64"
+        className={className}
+        style={{ transform: facingLeft ? 'scaleX(-1)' : undefined }}
+        aria-label="Sneaky red fox"
+        role="img"
+      >
+        <ellipse cx="32" cy="57" rx="18" ry="4" fill="rgba(45, 30, 24, 0.24)" />
+        {/* Bushy fox tail with cream tip */}
+        <path
+          d="M18 42C8 42 5 30 12 24c4 2 7 7 9 13z"
+          fill="#EA580C"
+          stroke="#2D1E18"
+          strokeWidth="2.4"
+          strokeLinejoin="round"
+        />
+        <path
+          d="M10 31c-2-3 0-6 2-7 3 2 5 5 6 8-3 1-6 0-8-1z"
+          fill="#FFF7ED"
+        />
+        {/* Body */}
+        <ellipse cx="30" cy="43" rx="13" ry="10.5" fill="#F97316" stroke="#2D1E18" strokeWidth="2.4" />
+        <ellipse cx="34" cy="45" rx="7.5" ry="7" fill="#FFF7ED" />
+        {/* Paws */}
+        <path d="M23 51v4.5M38 51v4.5" stroke="#2D1E18" strokeWidth="3.2" strokeLinecap="round" />
+        {/* Ears */}
+        <path d="M24 23l-4-11 10 6z" fill="#EA580C" stroke="#2D1E18" strokeWidth="2.3" strokeLinejoin="round" />
+        <path d="M40 23l4-11-10 6z" fill="#EA580C" stroke="#2D1E18" strokeWidth="2.3" strokeLinejoin="round" />
+        <path d="M24 20l-2-6 5 3zM40 20l2-6-5 3z" fill="#FED7AA" />
+        {/* Head */}
+        <path
+          d="M19 28c0-7.5 6-12 14-12s14 4.5 14 12c0 6-6.5 10.5-14 10.5S19 34 19 28z"
+          fill="#F97316"
+          stroke="#2D1E18"
+          strokeWidth="2.4"
+        />
+        {/* Cream cheek fur */}
+        <path
+          d="M21 31c3.5 0 6 2 8 6.5-4.5-.5-7.5-3-8-6.5zM45 31c-3.5 0-6 2-8 6.5 4.5-.5 7.5-3 8-6.5z"
+          fill="#FFF7ED"
+        />
+        {/* Mischievous eyes & nose */}
+        <ellipse cx="28" cy="27" rx="2.3" ry="2.7" fill="#2D1E18" />
+        <ellipse cx="39" cy="27" rx="2.3" ry="2.7" fill="#2D1E18" />
+        <circle cx="27.2" cy="26" r="0.9" fill="#FFFFFF" />
+        <circle cx="38.2" cy="26" r="0.9" fill="#FFFFFF" />
+        <path d="M25.5 23.2l4.5 1.3M41.5 23.2l-4.5 1.3" stroke="#2D1E18" strokeWidth="1.9" strokeLinecap="round" />
+        <ellipse cx="34" cy="32.5" rx="2.6" ry="1.9" fill="#2D1E18" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg
+      viewBox="0 0 64 64"
+      className={className}
+      style={{ transform: facingLeft ? 'scaleX(-1)' : undefined }}
+      aria-label="Farmyard crow"
+      role="img"
+    >
+      <ellipse cx="32" cy="57" rx="15" ry="3.8" fill="rgba(45, 30, 24, 0.24)" />
+      {/* Tail feathers */}
+      <path d="M16 40l-9 5 4-9z" fill="#1E293B" stroke="#0F172A" strokeWidth="2.2" strokeLinejoin="round" />
+      {/* Legs */}
+      <path d="M27 48v6.5M36 48v6.5" stroke="#F59E0B" strokeWidth="2.8" strokeLinecap="round" />
+      {/* Flapping Wing */}
+      <path
+        d="M25 32c-8-9-16-4-12 5 3 5 9 5 14 2z"
+        fill="#334155"
+        stroke="#0F172A"
+        strokeWidth="2.3"
+        strokeLinejoin="round"
+      />
+      {/* Body & Head */}
+      <ellipse cx="32" cy="39" rx="13" ry="11.5" fill="#1E293B" stroke="#0F172A" strokeWidth="2.4" />
+      <circle cx="36" cy="23" r="10.5" fill="#1E293B" stroke="#0F172A" strokeWidth="2.4" />
+      <path d="M29 19c2-4 7-5 11-3" fill="none" stroke="#64748B" strokeWidth="2" strokeLinecap="round" />
+      {/* Sharp Golden Beak */}
+      <path d="M44 21l11 3.5-10.5 4z" fill="#FBBF24" stroke="#2D1E18" strokeWidth="2.2" strokeLinejoin="round" />
+      {/* Alert Eye */}
+      <circle cx="39" cy="22" r="3" fill="#FEF3C7" stroke="#0F172A" strokeWidth="1.4" />
+      <circle cx="39.5" cy="22" r="1.5" fill="#0F172A" />
+      <circle cx="38.8" cy="21.2" r="0.6" fill="#FFFFFF" />
+      {/* Front wing highlight */}
+      <path d="M24 37c4-3 11-2 13 3-4 4-10 4-13-3z" fill="#334155" stroke="#0F172A" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+export function IncubatorNestEggSprite({
+  tier,
+  ready = false,
+  className = 'w-12 h-12',
+}: {
+  tier: IncubatorTierId;
+  ready?: boolean;
+  className?: string;
+}) {
+  const uid = useId();
+  const gradId = `incEgg-${uid}`;
+  const palette =
+    tier === 'royal'
+      ? { top: '#A7F3D0', mid: '#34D399', bottom: '#059669', spot: '#FEF08A' }
+      : tier === 'golden'
+        ? { top: '#FEF9C3', mid: '#FDE047', bottom: '#F59E0B', spot: '#FFFFFF' }
+        : { top: '#FFFFFF', mid: '#FFEDD5', bottom: '#FB923C', spot: '#FDBA74' };
+
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden="true">
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0.9" y2="1">
+          <stop offset="0%" stopColor={palette.top} />
+          <stop offset="55%" stopColor={palette.mid} />
+          <stop offset="100%" stopColor={palette.bottom} />
+        </linearGradient>
+      </defs>
+      {/* Cozy straw nest */}
+      <ellipse cx="24" cy="38" rx="18" ry="6.5" fill="#D97706" stroke="#3B261D" strokeWidth="2.2" />
+      <path d="M9 36.5c5 3 25 3 30 0M11 40c6 2.5 20 2.5 26 0" stroke="#FCD34D" strokeWidth="1.8" strokeLinecap="round" fill="none" />
+      {/* Egg */}
+      <path
+        d="M24 6.5C16.2 6.5 11.4 17.5 11.4 26.2c0 7.6 5.2 12.3 12.6 12.3s12.6-4.7 12.6-12.3C36.6 17.5 31.8 6.5 24 6.5z"
+        fill={`url(#${gradId})`}
+        stroke="#3B261D"
+        strokeWidth="2.3"
+      />
+      <ellipse cx="19.2" cy="17.5" rx="2.6" ry="5" transform="rotate(-15 19.2 17.5)" fill="#FFFFFF" opacity="0.85" />
+      <circle cx="29" cy="24" r="2.2" fill={palette.spot} opacity="0.65" />
+      <circle cx="26" cy="30" r="1.5" fill={palette.spot} opacity="0.55" />
+      {ready && (
+        <path
+          d="M17.5 22l4.2 3.2 3.3-3.4 3.8 3.6 3.7-2.6"
+          fill="none"
+          stroke="#3B261D"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      )}
+    </svg>
+  );
+}
+

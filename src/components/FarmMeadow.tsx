@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Award, Bot, Feather, Flame, Package, RefreshCw, Sparkles, Star, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Play, RefreshCw, Sparkles, Star, Timer, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import type { ChickenBreedId, EconomyConfig, UserFarmProfile } from '../types/farm';
+import type {
+  ChickenBreedId,
+  EconomyConfig,
+  MeadowCritterKind,
+  UserFarmProfile,
+} from '../types/farm';
 import {
   calculateProductionRate,
   calculateTotalChickens,
@@ -10,12 +15,15 @@ import {
   type ChickenMilestoneInfo,
   COOP_FEVER_MULTIPLIER,
   COOP_FEVER_REQUIRED_ADS,
+  CRITTER_EVENT_REWARDS,
   FEED_BOOSTER_COST_COINS,
   formatGoldenEggCooldownWait,
   getActiveReinvestSurgeStatus,
   getChickenMilestoneReached,
   getCoopFeverProgress,
+  getCritterEventStatus,
   getGoldenEggCooldownRemainingMs,
+  getIncubatorStatus,
   getWithdrawAdGateStatus,
   GOLDEN_EGG_REWARD_COINS,
   isAutoHarvestDroneActive,
@@ -23,7 +31,13 @@ import {
   isFeedBoosterActive,
   isGoldenEggReady,
 } from '../game/economy';
-import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
+import {
+  ChickenSprite,
+  CoinIcon,
+  CritterSprite,
+  EggIcon,
+  IncubatorNestEggSprite,
+} from './GameIcons';
 import { LivingFarmEffects } from './LivingFarmEffects';
 
 interface FarmMeadowProps {
@@ -37,6 +51,9 @@ interface FarmMeadowProps {
   onOpenYourFarm: () => void;
   onOpenWithdraw?: () => void;
   onOpenReinvest?: () => void;
+  onOpenHatchery?: () => void;
+  onSpeedUpIncubator?: () => void;
+  onCritterTap?: (critter: MeadowCritterKind) => void;
   onChickenTap: () => void;
   onGoldenEggDrop?: () => void;
   onActivateBooster?: () => void;
@@ -159,6 +176,9 @@ export function FarmMeadow({
   onOpenYourFarm,
   onOpenWithdraw,
   onOpenReinvest,
+  onOpenHatchery,
+  onSpeedUpIncubator,
+  onCritterTap,
   onChickenTap,
   onGoldenEggDrop,
   onActivateBooster,
@@ -173,6 +193,19 @@ export function FarmMeadow({
   const [tapBursts, setTapBursts] = useState<Array<{ seq: number; henId: string; isGolden: boolean }>>([]);
   const [harvestBurst, setHarvestBurst] = useState<{ seq: number; amount: number } | null>(null);
   const [chickenPurchaseBanner, setChickenPurchaseBanner] = useState<{ seq: number; addedCount: number } | null>(null);
+  const [activeCritter, setActiveCritter] = useState<{
+    seq: number;
+    kind: MeadowCritterKind;
+    x: number;
+    y: number;
+    facingLeft: boolean;
+  } | null>(null);
+  const [critterChasePop, setCritterChasePop] = useState<{
+    seq: number;
+    kind: MeadowCritterKind;
+    x: number;
+    y: number;
+  } | null>(null);
   const [meadowParticles, setMeadowParticles] = useState<MeadowParticle[]>([]);
   const [isCollectPopping, setIsCollectPopping] = useState(false);
   const [collectRippleSeq, setCollectRippleSeq] = useState(0);
@@ -253,9 +286,36 @@ export function FarmMeadow({
   const droneRemainingMs = Math.max(0, Number(profile.autoHarvestUntilMs ?? 0) - liveNowMs);
   const goldenRemainingMs = getGoldenEggCooldownRemainingMs(profile, liveNowMs);
   const goldenReady = isProfileSynced && isGoldenEggReady(profile, liveNowMs);
+  const incubatorStatus = getIncubatorStatus(profile, liveNowMs);
+  const critterStatus = getCritterEventStatus(profile, liveNowMs);
+  const critterReady = isProfileSynced && Boolean(onCritterTap) && critterStatus.ready;
   const productionRate = calculateProductionRate(profile, liveNowMs);
   const totalChickens = calculateTotalChickens(profile);
   const adGate = getWithdrawAdGateStatus(profile);
+
+  useEffect(() => {
+    if (!critterReady || !isFarmActive) {
+      setActiveCritter(null);
+      return;
+    }
+    if (activeCritter) return;
+
+    const delayMs = critterStatus.chasedCount === 0 ? 4500 : 9500;
+    const timer = window.setTimeout(() => {
+      const seq = ++chirpSeqRef.current;
+      const isFox = seq % 2 === 1;
+      const x = isFox ? 24 + (seq % 3) * 4 : 69 + (seq % 3) * 3;
+      const y = isFox ? 60 + (seq % 2) * 3 : 40 + (seq % 2) * 3;
+      setActiveCritter({
+        seq,
+        kind: isFox ? 'fox' : 'crow',
+        x,
+        y,
+        facingLeft: !isFox,
+      });
+    }, delayMs);
+    return () => window.clearTimeout(timer);
+  }, [activeCritter, critterReady, critterStatus.chasedCount, isFarmActive]);
 
   const spawnMeadowParticleBurst = (kind: 'egg_collect' | 'chicken_buy', countAdded = 1) => {
     const batchSeq = ++particleBatchSeqRef.current;
@@ -688,6 +748,78 @@ export function FarmMeadow({
             </button>
           );
         })}
+
+        {/* Occasional Fox / Crow Mini-Event Critter */}
+        <AnimatePresence>
+          {activeCritter && critterReady && (
+            <motion.button
+              key={`critter-${activeCritter.seq}`}
+              type="button"
+              data-testid="meadow-critter-event"
+              initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.55, y: 12 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.45, x: activeCritter.kind === 'fox' ? -40 : 40, y: -24 }}
+              transition={{ type: 'spring', stiffness: 360, damping: 24 }}
+              style={{
+                left: `${activeCritter.x}%`,
+                top: `${activeCritter.y}%`,
+                zIndex: 88,
+                transform: 'translate(-50%, -50%)',
+              }}
+              onClick={() => {
+                const tapped = activeCritter;
+                setActiveCritter(null);
+                setCritterChasePop({
+                  seq: tapped.seq,
+                  kind: tapped.kind,
+                  x: tapped.x,
+                  y: tapped.y,
+                });
+                const clearPopTimer = window.setTimeout(() => {
+                  setCritterChasePop((cur) => (cur?.seq === tapped.seq ? null : cur));
+                }, 1300);
+                effectTimersRef.current.push(clearPopTimer);
+                onCritterTap?.(tapped.kind);
+              }}
+              aria-label={`Chase away ${CRITTER_EVENT_REWARDS[activeCritter.kind].name} for +${CRITTER_EVENT_REWARDS[activeCritter.kind].coins} bonus coins`}
+              className="group absolute p-1 cursor-pointer pointer-events-auto focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full"
+            >
+              <span
+                aria-hidden="true"
+                className="animate-collect-halo pointer-events-none absolute -inset-2 rounded-full bg-orange-400/35 blur-sm"
+              />
+              <span className="animate-clay-badge pointer-events-none absolute -top-6 left-1/2 -translate-x-1/2 rounded-full bg-gradient-to-r from-orange-500 to-amber-400 text-stone-950 border border-white/80 px-2 py-0.5 text-[10px] font-extrabold whitespace-nowrap shadow-md">
+                {activeCritter.kind === 'fox' ? 'Fox!' : 'Crow!'} +{CRITTER_EVENT_REWARDS[activeCritter.kind].coins}c
+              </span>
+              <div className="animate-chicken-bob transition-transform duration-200 group-hover:scale-110 group-active:scale-90">
+                <CritterSprite
+                  kind={activeCritter.kind}
+                  className="w-16 h-16 drop-shadow-[0_6px_12px_rgba(12,18,10,0.52)]"
+                  facingLeft={activeCritter.facingLeft}
+                />
+              </div>
+            </motion.button>
+          )}
+        </AnimatePresence>
+
+        {critterChasePop && (
+          <div
+            key={`critter-pop-${critterChasePop.seq}`}
+            aria-hidden="true"
+            style={{
+              left: `${critterChasePop.x}%`,
+              top: `${critterChasePop.y}%`,
+              zIndex: 92,
+              transform: 'translate(-50%, -50%)',
+            }}
+            className="pointer-events-none absolute"
+          >
+            <span className="animate-harvest-rise inline-flex items-center gap-1 rounded-full bg-gradient-to-r from-amber-400 to-orange-400 text-stone-950 border border-white/80 px-2.5 py-0.5 text-[11px] font-extrabold shadow-lg whitespace-nowrap">
+              <Sparkles className="w-3 h-3 shrink-0" />
+              <span>Shoo! +{CRITTER_EVENT_REWARDS[critterChasePop.kind].coins}c</span>
+            </span>
+          </div>
+        )}
         </div>
       </LivingFarmEffects>
 
@@ -1092,6 +1224,108 @@ export function FarmMeadow({
 
       {/* Bottom Action Dock (floats cleanly above mobile BottomNav) */}
       <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex flex-col gap-2">
+        {/* Egg Incubator / Hatchery Compact Dock */}
+        {onOpenHatchery && (
+          <motion.div
+            key={`incubator-dock-${incubatorStatus.status}-${entranceEpoch}`}
+            initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 8, scale: 0.97 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            transition={{ duration: 0.25, ease: [0.22, 1, 0.36, 1] }}
+            className="flex items-center gap-2"
+          >
+            <button
+              type="button"
+              onClick={onOpenHatchery}
+              aria-label="Open Egg Incubator and Hatchery"
+              className={`clay-btn flex-1 min-h-[44px] rounded-2xl px-3 py-1.5 flex items-center justify-between gap-2 text-left ${
+                incubatorStatus.status === 'ready'
+                  ? 'clay-btn-emerald animate-pulse'
+                  : incubatorStatus.status === 'incubating'
+                    ? 'clay-card-warm !rounded-2xl'
+                    : 'bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 hover:bg-[#FEF9C3] dark:hover:bg-[#252D4A] border-2 border-[#3B261D] dark:border-[#4D598A] shadow-[0_3px_0_#3B261D] dark:shadow-[0_3px_0_#090B14]'
+              }`}
+            >
+              <div className="flex items-center gap-2 min-w-0">
+                <div className="w-7 h-7 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
+                  <IncubatorNestEggSprite
+                    tier={incubatorStatus.tier?.id ?? 'golden'}
+                    ready={incubatorStatus.status === 'ready'}
+                    className={`w-6 h-6 ${incubatorStatus.status === 'incubating' ? 'animate-egg-wiggle' : ''}`}
+                  />
+                </div>
+                <div className="min-w-0">
+                  <div
+                    className={`text-xs font-extrabold truncate ${
+                      incubatorStatus.status === 'ready'
+                        ? 'text-white'
+                        : 'text-stone-900 dark:text-stone-100'
+                    }`}
+                  >
+                    {incubatorStatus.status === 'ready'
+                      ? 'Egg Ready! Tap to Hatch'
+                      : incubatorStatus.status === 'incubating' && incubatorStatus.tier
+                        ? `${incubatorStatus.tier.name}`
+                        : 'Egg Incubator · Hatch a Hen'}
+                  </div>
+                  {incubatorStatus.status === 'incubating' ? (
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-[10px] font-bold font-mono-num tabular-nums text-amber-800 dark:text-amber-300 inline-flex items-center gap-1">
+                        <Timer className="w-3 h-3 shrink-0" />
+                        <span>{formatCountdownMs(incubatorStatus.remainingMs)}</span>
+                      </span>
+                      <div className="w-12 h-1.5 rounded-full bg-black/15 dark:bg-white/15 overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-emerald-500 transition-all duration-300"
+                          style={{ width: `${incubatorStatus.progressPct}%` }}
+                        />
+                      </div>
+                    </div>
+                  ) : (
+                    <div
+                      className={`text-[10px] font-semibold truncate ${
+                        incubatorStatus.status === 'ready'
+                          ? 'text-emerald-50'
+                          : 'text-stone-500 dark:text-stone-400'
+                      }`}
+                    >
+                      {incubatorStatus.status === 'ready'
+                        ? 'Tap to reveal your new laying hen!'
+                        : `Turn eggs or coins into hens · Hatched: ${incubatorStatus.hatchedCount}`}
+                    </div>
+                  )}
+                </div>
+              </div>
+              <span
+                className={`text-[10px] font-extrabold px-2 py-0.5 rounded-lg shrink-0 ${
+                  incubatorStatus.status === 'ready'
+                    ? 'bg-white/25 text-white'
+                    : incubatorStatus.status === 'incubating'
+                      ? 'bg-amber-500/20 text-amber-900 dark:text-amber-200 font-mono-num'
+                      : 'bg-amber-500/15 text-amber-800 dark:text-amber-300'
+                }`}
+              >
+                {incubatorStatus.status === 'ready'
+                  ? 'Hatch!'
+                  : incubatorStatus.status === 'incubating'
+                    ? `${incubatorStatus.progressPct}%`
+                    : 'Open'}
+              </span>
+            </button>
+
+            {incubatorStatus.canSpeedUpWithAd && onSpeedUpIncubator && (
+              <button
+                type="button"
+                onClick={onSpeedUpIncubator}
+                aria-label="Watch ad to speed up incubating egg by 50%"
+                className="clay-btn clay-btn-amber min-h-[44px] px-3 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1 shrink-0"
+              >
+                <Play className="w-3.5 h-3.5 fill-current shrink-0" />
+                <span>-50% Ad</span>
+              </button>
+            )}
+          </motion.div>
+        )}
+
         {/* Primary Farm & Collect Dock */}
         <div className="flex items-end gap-2.5">
           <motion.button

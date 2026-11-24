@@ -37,6 +37,8 @@ import {
   claimAdsgramBotJoinReward,
   claimDailyStreak,
   claimGoldenEggDrop,
+  claimIncubatedEgg,
+  claimCritterReward,
   claimPromoCode,
   claimReferralMilestone,
   collectEggs,
@@ -46,6 +48,8 @@ import {
   COOP_FEVER_DURATION_MS,
   COOP_FEVER_MULTIPLIER,
   COOP_FEVER_REQUIRED_ADS,
+  CRITTER_EVENT_COOLDOWN_MS,
+  CRITTER_EVENT_REWARDS,
   createDefaultProfile,
   createDefaultSeasonConfig,
   createDepositQuote,
@@ -75,6 +79,11 @@ import {
   filterPlayersBySearchQuery,
   getActiveReinvestSurgeStatus,
   getCoopFeverProgress,
+  getCritterEventStatus,
+  getIncubatorStatus,
+  getIncubatorTier,
+  INCUBATOR_MAX_AD_SPEEDUPS,
+  INCUBATOR_TIERS,
   isAutoHarvestDroneActive,
   isChannelVerificationSatisfied,
   isCoopFeverActive,
@@ -86,6 +95,8 @@ import {
   resolveEconomyConfig,
   resolveMaintenanceConfig,
   resolveReinvestSurge,
+  speedUpIncubationWithAd,
+  startIncubation,
   USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
@@ -4205,4 +4216,150 @@ test('Reinvest Surge Windows resolve clamping, active/scheduled/expired status, 
   assert.equal(postSurgeExec.bonusPercent, 5);
   assert.match(postSurgeExec.transaction.title, /\+5% extra/);
 });
+
+test('Egg Incubator / Hatchery validates balance, runs countdown speedups via ads, hatches breeds, and triggers referral activation', () => {
+  const { profile } = createDefaultProfile('player_inc1', 'HatchUser', '@hatch', NOW);
+  assert.equal(getIncubatorStatus(profile, NOW).status, 'idle');
+  assert.equal(INCUBATOR_TIERS.length, 3);
+
+  // Rejects start when player lacks Eggs or Coins
+  const strawTier = getIncubatorTier('straw');
+  const poorEggs = startIncubation(profile, 'straw', 'eggs', NOW);
+  assert.ok('error' in poorEggs);
+  const poorCoins = startIncubation({ ...profile, coins: 100 }, 'straw', 'coins', NOW);
+  assert.ok('error' in poorCoins);
+
+  // Start Warm Straw Nest using Eggs
+  const eggFunded = { ...profile, eggs: strawTier.eggCost + 500, referredBy: 'tg_ref_hatch' };
+  const started = startIncubation(eggFunded, 'straw', 'eggs', NOW);
+  assert.ok(!('error' in started));
+  assert.equal(started.profile.eggs, 500);
+  assert.equal(started.transaction.type, 'booster');
+  assert.equal(started.transaction.currency, 'eggs');
+  assert.equal(started.transaction.amount, -strawTier.eggCost);
+
+  const incubatingStatus = getIncubatorStatus(started.profile, NOW + 3_600_000); // 1h elapsed -> 3h remaining
+  assert.equal(incubatingStatus.status, 'incubating');
+  assert.equal(incubatingStatus.remainingMs, 3 * 3_600_000);
+  assert.equal(incubatingStatus.canSpeedUpWithAd, true);
+  assert.equal(incubatingStatus.nextAdSavedMs, 1.5 * 3_600_000);
+
+  // Prevent starting a 2nd incubation while active
+  const dupStart = startIncubation({ ...started.profile, coins: 50_000 }, 'golden', 'coins', NOW + 1000);
+  assert.ok('error' in dupStart);
+
+  // Prevent claiming before timer finishes
+  const earlyClaim = claimIncubatedEgg(started.profile, NOW + 3_600_000, 0.1);
+  assert.ok('error' in earlyClaim);
+
+  // Ad Speed-Up #1 reduces remaining time by 50% and increments totalAdsWatched
+  const sp1 = speedUpIncubationWithAd(started.profile, NOW + 3_600_000);
+  assert.ok(!('error' in sp1));
+  assert.equal(sp1.savedMs, 1.5 * 3_600_000);
+  assert.equal(sp1.remainingMs, 1.5 * 3_600_000);
+  assert.equal(sp1.isNowReady, false);
+  assert.equal(sp1.profile.totalAdsWatched, 1);
+  assert.equal(sp1.profile.incubatorState?.speedupsUsed, 1);
+
+  // Ad Speed-Up #2 reduces remaining time again; #3 is blocked by INCUBATOR_MAX_AD_SPEEDUPS
+  const sp2 = speedUpIncubationWithAd(sp1.profile, NOW + 3_600_000);
+  assert.ok(!('error' in sp2));
+  assert.equal(sp2.profile.incubatorState?.speedupsUsed, INCUBATOR_MAX_AD_SPEEDUPS);
+  assert.equal(sp2.profile.totalAdsWatched, 2);
+
+  const sp3 = speedUpIncubationWithAd(sp2.profile, NOW + 3_600_000);
+  assert.ok('error' in sp3);
+
+  // Advance past shortened readyAtMs -> ready to hatch
+  const readyAtMs = sp2.profile.incubatorState!.readyAtMs;
+  const readyStatus = getIncubatorStatus(sp2.profile, readyAtMs);
+  assert.equal(readyStatus.status, 'ready');
+  assert.equal(readyStatus.progressPct, 100);
+  assert.equal(readyStatus.canSpeedUpWithAd, false);
+
+  // Deterministic rollValue 0.90 selects rare Rhode Island Red (15% chance) from Straw nest
+  const hatched = claimIncubatedEgg(sp2.profile, readyAtMs, 0.9);
+  assert.ok(!('error' in hatched));
+  assert.equal(hatched.hatchedBreed, 'rhode');
+  assert.equal(hatched.profile.rhodeCount, 1);
+  assert.equal(hatched.profile.incubatorState, null);
+  assert.equal(hatched.profile.incubatorHatchedCount, 1);
+  assert.equal(hatched.profile.lastCollectedAt, readyAtMs);
+  assert.equal(hatched.shouldActivateReferral, true);
+  assert.equal(hatched.profile.referralActivated, true);
+  assert.equal(hatched.transaction.type, 'buy_chicken');
+
+  // Royal tier started with Coins + rare Australorp roll (rollValue = 0.95)
+  const royalReady = startIncubation({ ...hatched.profile, coins: 20_000 }, 'royal', 'coins', readyAtMs + 1000);
+  assert.ok(!('error' in royalReady));
+  assert.equal(royalReady.transaction.currency, 'coins');
+  const royalTier = getIncubatorTier('royal');
+  const royalHatched = claimIncubatedEgg(royalReady.profile, readyAtMs + 1000 + royalTier.durationMs, 0.95);
+  assert.ok(!('error' in royalHatched));
+  assert.equal(royalHatched.hatchedBreed, 'australorp');
+  assert.equal(royalHatched.profile.australorpCount, 1);
+  assert.equal(royalHatched.profile.incubatorHatchedCount, 2);
+  assert.equal(royalHatched.shouldActivateReferral, false);
+});
+
+test('Fox / Crow Meadow Mini-Event grants Coins + XP after ad, enforces 15m cooldown, and serializes cleanly in Firestore tokens', () => {
+  const { profile } = createDefaultProfile('player_critter1', 'PatrolUser', '@patrol', NOW);
+  assert.equal(getCritterEventStatus(profile, NOW).ready, true);
+
+  // Claim Fox event reward
+  const foxClaim = claimCritterReward(profile, 'fox', NOW);
+  assert.ok(!('error' in foxClaim));
+  assert.equal(foxClaim.coinsAwarded, CRITTER_EVENT_REWARDS.fox.coins);
+  assert.equal(foxClaim.xpAwarded, CRITTER_EVENT_REWARDS.fox.xp);
+  assert.equal(foxClaim.profile.coins, profile.coins + CRITTER_EVENT_REWARDS.fox.coins);
+  assert.equal(foxClaim.profile.critterChasedCount, 1);
+  assert.equal(foxClaim.profile.lastCritterEventAtMs, NOW);
+  assert.equal(foxClaim.profile.totalAdsWatched, 1);
+  assert.equal(foxClaim.transaction.type, 'task');
+
+  // Immediate repeat claim blocked during 15-minute cooldown
+  const duringCooldown = getCritterEventStatus(foxClaim.profile, NOW + 5 * 60_000);
+  assert.equal(duringCooldown.ready, false);
+  assert.equal(duringCooldown.remainingMs, 10 * 60_000);
+  const blocked = claimCritterReward(foxClaim.profile, 'crow', NOW + 5 * 60_000);
+  assert.ok('error' in blocked);
+
+  // Unlocks after cooldown expires and awards Crow reward
+  const afterCooldownMs = NOW + CRITTER_EVENT_COOLDOWN_MS;
+  assert.equal(getCritterEventStatus(foxClaim.profile, afterCooldownMs).ready, true);
+  const crowClaim = claimCritterReward(foxClaim.profile, 'crow', afterCooldownMs);
+  assert.ok(!('error' in crowClaim));
+  assert.equal(crowClaim.coinsAwarded, CRITTER_EVENT_REWARDS.crow.coins);
+  assert.equal(crowClaim.xpAwarded, CRITTER_EVENT_REWARDS.crow.xp);
+  assert.equal(crowClaim.profile.critterChasedCount, 2);
+  assert.equal(crowClaim.profile.totalAdsWatched, 2);
+
+  // Compact Firestore achievement-token serialization stays <= 64 chars per token and round-trips faithfully
+  const goldenStart = startIncubation({ ...crowClaim.profile, coins: 10_000 }, 'golden', 'coins', afterCooldownMs);
+  assert.ok(!('error' in goldenStart));
+  const withHatchedCount = { ...goldenStart.profile, incubatorHatchedCount: 4 };
+  const encodedTokens = encodeAchievementsWithAds(
+    ['first_chicken'],
+    withHatchedCount.totalAdsWatched,
+    {
+      incubatorState: withHatchedCount.incubatorState,
+      incubatorHatchedCount: withHatchedCount.incubatorHatchedCount,
+      lastCritterEventAtMs: withHatchedCount.lastCritterEventAtMs,
+      critterChasedCount: withHatchedCount.critterChasedCount,
+    },
+  );
+  assert.ok(encodedTokens.length <= 50);
+  for (const token of encodedTokens) {
+    assert.ok(token.length <= 64, `Token exceeds 64 chars: ${token}`);
+  }
+
+  const decoded = decodeAchievementsAndAds(encodedTokens, 0, 0);
+  assert.deepEqual(decoded.claimedAchievementIds, ['first_chicken']);
+  assert.equal(decoded.totalAdsWatched, 2);
+  assert.deepEqual(decoded.incubatorState, withHatchedCount.incubatorState);
+  assert.equal(decoded.incubatorHatchedCount, 4);
+  assert.equal(decoded.lastCritterEventAtMs, afterCooldownMs);
+  assert.equal(decoded.critterChasedCount, 2);
+});
+
 

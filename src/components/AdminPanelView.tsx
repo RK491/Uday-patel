@@ -67,6 +67,7 @@ import type {
   AdminsConfig,
   BannedUserRecord,
   ChannelCheckDiagnosticLog,
+  ChannelVerificationResult,
   ChannelsConfig,
   ChickenBreedId,
   DynamicPromoCode,
@@ -124,7 +125,13 @@ import {
   resolveTaskPricingConfig,
   sanitizeExternalUrl,
 } from '../game/economy';
-import { getConfiguredApiBaseUrl, setConfiguredApiBaseUrl } from '../utils/telegram';
+import {
+  getApiBaseUrlDiagnostics,
+  getConfiguredApiBaseUrl,
+  probeVerificationServerConnection,
+  setConfiguredApiBaseUrl,
+  type VerificationServerProbeResult,
+} from '../utils/telegram';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface ChannelDiagnosticResult {
@@ -178,6 +185,9 @@ interface AdminPanelViewProps {
   onVerifyAdminPasscode: (passcode: string) => Promise<{ ok: boolean; error?: string; needsPasscodeSetup?: boolean }>;
   onSetupInitialAdminPasscode?: (passcode: string) => Promise<{ ok: boolean; error?: string }>;
   onTestChannels?: (channels?: RequiredTelegramChannel[]) => Promise<ChannelDiagnosticResult>;
+  channelVerification?: ChannelVerificationResult | null;
+  channelCheckError?: string | null;
+  onRetestChannelVerification?: () => Promise<unknown> | void;
   channelDiagnosticLogs?: ChannelCheckDiagnosticLog[];
   loadingChannelLogs?: boolean;
   channelLogsError?: string | null;
@@ -431,6 +441,9 @@ export function AdminPanelView({
   onVerifyAdminPasscode,
   onSetupInitialAdminPasscode,
   onTestChannels,
+  channelVerification = null,
+  channelCheckError = null,
+  onRetestChannelVerification,
   channelDiagnosticLogs = [],
   loadingChannelLogs = false,
   channelLogsError = null,
@@ -975,6 +988,57 @@ export function AdminPanelView({
     type: 'ok' | 'error';
     text: string;
   } | null>(null);
+  const [apiBaseDiag, setApiBaseDiag] = useState(() => getApiBaseUrlDiagnostics());
+  const [serverProbe, setServerProbe] = useState<VerificationServerProbeResult | null>(null);
+  const [probingServer, setProbingServer] = useState(false);
+
+  const runVerificationServerProbe = async (options?: { retestChannels?: boolean }) => {
+    setProbingServer(true);
+    setApiBaseDiag(getApiBaseUrlDiagnostics());
+    try {
+      const result = await probeVerificationServerConnection();
+      setServerProbe(result);
+      setApiBaseDiag(getApiBaseUrlDiagnostics());
+      if (result.reachable && options?.retestChannels) {
+        if (onRetestChannelVerification) {
+          void onRetestChannelVerification();
+        }
+        if (isStrictAdminAuthenticated) {
+          if (onFetchSystemDiagnostics) {
+            void onFetchSystemDiagnostics(true);
+          }
+          if (onRefreshChannelLogs) {
+            void onRefreshChannelLogs();
+          }
+        }
+      }
+      return result;
+    } finally {
+      setProbingServer(false);
+    }
+  };
+
+  useEffect(() => {
+    if (!isAuthorizedAdmin) return;
+    let cancelled = false;
+    setProbingServer(true);
+    setApiBaseDiag(getApiBaseUrlDiagnostics());
+    void probeVerificationServerConnection()
+      .then((result) => {
+        if (!cancelled) {
+          setServerProbe(result);
+          setApiBaseDiag(getApiBaseUrlDiagnostics());
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setProbingServer(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAuthorizedAdmin]);
 
   // Quick Standalone Referral Linker state
   const [quickReferrerInput, setQuickReferrerInput] = useState('');
@@ -1852,12 +1916,14 @@ export function AdminPanelView({
     onTabTap?.();
     const saved = setConfiguredApiBaseUrl(backendUrlDraft);
     setBackendUrlDraft(saved);
+    setApiBaseDiag(getApiBaseUrlDiagnostics());
     setBackendUrlFeedback({
       type: 'ok',
       text: saved
         ? `Backend API URL set to ${saved}. Re-testing endpoints...`
         : 'Backend API URL reset to current site origin.',
     });
+    void runVerificationServerProbe({ retestChannels: true });
     if (onFetchSystemDiagnostics) {
       void onFetchSystemDiagnostics(true);
     }
@@ -2158,6 +2224,267 @@ export function AdminPanelView({
     }
   };
 
+  const passcodeIndicatesServerUnreachable = Boolean(
+    passcodeError &&
+      /unavailable|unable to reach|verification server|network error/i.test(passcodeError),
+  );
+  const channelVerifyUnreachable =
+    channelVerification?.verificationMode === 'static_preview' ||
+    Boolean(
+      channelCheckError &&
+        /unreachable|static preview|network error|failed \(http (404|405|5\d\d)\)/i.test(
+          channelCheckError,
+        ),
+    );
+  const diagnosticUnreachable = Boolean(
+    (channelDiagnostic?.botError &&
+      /static preview|no express server|unreachable/i.test(channelDiagnostic.botError)) ||
+      (channelDiagnostic?.error &&
+        /unable to reach|unreachable/i.test(channelDiagnostic.error)),
+  );
+  const syncUnreachable = Boolean(
+    channelSyncSummary &&
+      !channelSyncSummary.ok &&
+      /unable to reach|unreachable/i.test(channelSyncSummary.text),
+  );
+  const sysDiagUnreachable =
+    systemDiagnostics?.env === 'static-preview' ||
+    Boolean(
+      systemDiagnosticsError && /network error|unreachable/i.test(systemDiagnosticsError),
+    ) ||
+    Boolean(channelLogsError && /network error|unreachable/i.test(channelLogsError));
+
+  const latestFailureTimestampMs = Math.max(
+    channelVerification?.checkedAtMs ?? 0,
+    systemDiagnostics?.env === 'static-preview' ? systemDiagnostics.serverTimeMs : 0,
+  );
+  const hasRecentHealthyProbe = Boolean(
+    serverProbe?.reachable && serverProbe.checkedAtMs >= latestFailureTimestampMs,
+  );
+
+  const isVerificationServerUnreachable =
+    serverProbe?.reachable === false ||
+    (!hasRecentHealthyProbe &&
+      (passcodeIndicatesServerUnreachable ||
+        channelVerifyUnreachable ||
+        diagnosticUnreachable ||
+        syncUnreachable ||
+        sysDiagUnreachable));
+
+  const renderConnectionDiagnosticCard = (context: 'lock' | 'panel' = 'panel') => {
+    if (!isVerificationServerUnreachable) return null;
+
+    const reportedError =
+      serverProbe?.error ||
+      (passcodeIndicatesServerUnreachable ? passcodeError : null) ||
+      channelCheckError ||
+      channelDiagnostic?.botError ||
+      channelDiagnostic?.error ||
+      (syncUnreachable ? channelSyncSummary?.text : null) ||
+      (systemDiagnostics?.env === 'static-preview'
+        ? 'Static preview detected — Express backend API routes are not responding with JSON on this URL.'
+        : null) ||
+      systemDiagnosticsError ||
+      channelLogsError ||
+      'Unable to reach the membership verification backend server.';
+
+    return (
+      <section
+        aria-label="Connection Diagnostic"
+        className={`clay-card p-4 space-y-3 border border-rose-300/80 dark:border-rose-800/70 ${
+          context === 'lock' ? 'max-w-md mx-auto' : ''
+        }`}
+      >
+        <div className="flex items-start justify-between gap-2 flex-wrap">
+          <div className="flex items-start gap-2.5 min-w-0">
+            <div className="w-9 h-9 rounded-xl bg-rose-500/15 border border-rose-300/60 dark:border-rose-700/60 flex items-center justify-center shrink-0 text-rose-600 dark:text-rose-400">
+              <ShieldAlert className="w-4 h-4" />
+            </div>
+            <div className="min-w-0">
+              <h3 className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                Connection Diagnostic
+              </h3>
+              <p className="text-[11px] text-stone-600 dark:text-stone-300 mt-0.5">
+                Membership verification server is unreachable from this client session.
+              </p>
+            </div>
+          </div>
+          <span className="px-2 py-0.5 rounded-lg border bg-rose-50 dark:bg-rose-950/60 border-rose-200 dark:border-rose-800/70 text-[10px] font-extrabold text-rose-700 dark:text-rose-300 shrink-0">
+            SERVER UNREACHABLE
+          </span>
+        </div>
+
+        <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/70 px-3 py-2 text-xs font-bold text-rose-800 dark:text-rose-200 break-words">
+          {reportedError}
+        </div>
+
+        <div className="clay-inset !rounded-xl p-3 space-y-1.5 text-[11px] font-mono-num">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="font-sans font-bold text-stone-500 dark:text-stone-400">
+              VITE_API_BASE_URL
+            </span>
+            <span
+              className={`font-extrabold break-all ${
+                apiBaseDiag.envApiBaseUrlInvalid
+                  ? 'text-rose-600 dark:text-rose-400'
+                  : apiBaseDiag.envApiBaseUrl
+                    ? 'text-sky-700 dark:text-sky-300'
+                    : 'text-stone-700 dark:text-stone-300'
+              }`}
+            >
+              {apiBaseDiag.envApiBaseUrlInvalid
+                ? `Invalid (${apiBaseDiag.rawEnvApiBaseUrl})`
+                : apiBaseDiag.envApiBaseUrl || 'Not set (using same-origin)'}
+            </span>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="font-sans font-bold text-stone-500 dark:text-stone-400">
+              Backend URL Override
+            </span>
+            <div className="flex items-center gap-2 min-w-0">
+              <span className="font-extrabold text-stone-800 dark:text-stone-200 break-all">
+                {apiBaseDiag.localStorageOverrideUrl || 'None'}
+              </span>
+              {apiBaseDiag.localStorageOverrideUrl && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onTabTap?.();
+                    const cleared = setConfiguredApiBaseUrl('');
+                    setBackendUrlDraft(cleared);
+                    setBackendUrlFeedback({
+                      type: 'ok',
+                      text: 'Cleared stale Backend Server URL override. Re-testing...',
+                    });
+                    void runVerificationServerProbe({ retestChannels: true });
+                  }}
+                  className="font-sans text-[10px] font-extrabold text-rose-600 dark:text-rose-400 hover:underline shrink-0 cursor-pointer"
+                >
+                  Clear Override
+                </button>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <span className="font-sans font-bold text-stone-500 dark:text-stone-400">
+              Current App Origin
+            </span>
+            <span className="font-bold text-stone-700 dark:text-stone-300 break-all">
+              {apiBaseDiag.currentOrigin || 'Unknown'}
+            </span>
+          </div>
+
+          <div className="pt-1 border-t border-stone-200/70 dark:border-stone-700/70 space-y-0.5">
+            <div className="font-sans font-bold text-stone-500 dark:text-stone-400">
+              Endpoints Tested
+            </div>
+            <div className="text-[10px] text-stone-700 dark:text-stone-300 break-all">
+              {apiBaseDiag.candidateUrls.join(' → ')}
+            </div>
+            {serverProbe && (
+              <div className="text-[10px] text-stone-500 dark:text-stone-400">
+                Last probe: {new Date(serverProbe.checkedAtMs).toLocaleTimeString()}
+                {serverProbe.httpStatus !== null ? ` · HTTP ${serverProbe.httpStatus}` : ''}
+                {serverProbe.contentType ? ` · ${serverProbe.contentType}` : ''}
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="clay-inset !rounded-xl p-3 space-y-1.5">
+          <div className="text-[11px] font-extrabold uppercase tracking-wide text-stone-700 dark:text-stone-200">
+            Troubleshooting Steps
+          </div>
+          <ol className="list-decimal list-inside space-y-1 text-[11px] text-stone-700 dark:text-stone-300 leading-snug">
+            <li>
+              <span className="font-bold">Check <code className="font-mono-num">VITE_API_BASE_URL</code>:</span>{' '}
+              Ensure it is either unset (for same-origin Express hosting) or set to your live HTTPS server root (e.g. <code className="font-mono-num">https://your-host.run.app</code>) with no trailing slash or <code className="font-mono-num">/api</code> suffix, then rebuild the frontend.
+            </li>
+            <li>
+              <span className="font-bold">Verify Express API Routing:</span>{' '}
+              Confirm <code className="font-mono-num">/api/health</code> and <code className="font-mono-num">/api/telegram/check-channels</code> return <code className="font-mono-num">application/json</code> instead of an HTML SPA page.
+            </li>
+            <li>
+              <span className="font-bold">Check Preview Host &amp; Override:</span>{' '}
+              If opened on a static CDN or blocked <code className="font-mono-num">ais-dev-*</code> preview URL, open your Bot Mini App server URL or set the live backend URL in{' '}
+              <span className="font-bold">Backend Server URL</span>.
+            </li>
+            <li>
+              <span className="font-bold">Verify Bot Token &amp; Outbound Network:</span>{' '}
+              Confirm <code className="font-mono-num">TELEGRAM_BOT_TOKEN</code> is configured on the server (or saved in Admin Panel) and outbound calls to <code className="font-mono-num">api.telegram.org</code> are allowed.
+            </li>
+          </ol>
+        </div>
+
+        {context === 'lock' && (
+          <form
+            onSubmit={handleSaveBackendUrlSubmit}
+            className="pt-1 space-y-1.5"
+          >
+            <label
+              htmlFor="admin-lock-backend-api-url"
+              className="text-[11px] font-extrabold text-stone-700 dark:text-stone-300 flex items-center gap-1.5"
+            >
+              <Server className="w-3.5 h-3.5 text-amber-500" />
+              <span>Backend Server URL Override</span>
+            </label>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                id="admin-lock-backend-api-url"
+                type="url"
+                value={backendUrlDraft}
+                onChange={(e) => {
+                  setBackendUrlDraft(e.target.value);
+                  setBackendUrlFeedback(null);
+                }}
+                placeholder="https://your-bot-server.run.app (blank = same-origin)"
+                className="clay-inset flex-1 min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400"
+              />
+              <button
+                type="submit"
+                className="clay-btn clay-btn-sky min-h-[38px] px-3 rounded-xl text-xs font-extrabold shrink-0"
+              >
+                Save &amp; Test
+              </button>
+            </div>
+            {backendUrlFeedback && (
+              <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+                {backendUrlFeedback.text}
+              </div>
+            )}
+          </form>
+        )}
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            disabled={probingServer}
+            onClick={() => {
+              onTabTap?.();
+              void runVerificationServerProbe({ retestChannels: true });
+            }}
+            className="clay-btn clay-btn-sky min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-55"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${probingServer ? 'animate-spin' : ''}`} />
+            <span>{probingServer ? 'Testing Connection...' : 'Re-test Connection'}</span>
+          </button>
+          {context === 'panel' && tab !== 'channels' && (
+            <button
+              type="button"
+              onClick={() => navigateAdminTab('channels')}
+              className="clay-btn clay-btn-neutral min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Configure Backend URL</span>
+            </button>
+          )}
+        </div>
+      </section>
+    );
+  };
+
   if (!isAuthorizedAdmin) {
     return (
       <div className="animate-clay-enter space-y-6 pb-8">
@@ -2351,6 +2678,8 @@ export function AdminPanelView({
             </div>
           </div>
         </form>
+
+        {renderConnectionDiagnosticCard('lock')}
       </div>
     );
   }
@@ -2499,7 +2828,9 @@ export function AdminPanelView({
                   onClick={() => {
                     const cleared = setConfiguredApiBaseUrl('');
                     setBackendUrlDraft(cleared);
+                    setApiBaseDiag(getApiBaseUrlDiagnostics());
                     setBackendUrlFeedback({ type: 'ok', text: 'Reset to default same-origin server.' });
+                    void runVerificationServerProbe({ retestChannels: true });
                   }}
                   className="text-[10px] font-bold text-rose-600 dark:text-rose-400 hover:underline cursor-pointer"
                 >
@@ -3159,6 +3490,8 @@ export function AdminPanelView({
           </div>
         );
       })()}
+
+      {renderConnectionDiagnosticCard('panel')}
 
       {/* ========================================================================
           USER SEARCH, COINS, REFERS & MODERATION TAB

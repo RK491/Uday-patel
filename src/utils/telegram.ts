@@ -616,15 +616,9 @@ export function resolveApiCandidateUrls(endpointPath: string): string[] {
     }
   };
 
-  pushUnique(resolveApiUrl(cleanPath));
-
-  if (typeof window !== 'undefined' && window.location?.origin) {
-    const sameOriginUrl = new URL(cleanPath, window.location.origin).toString();
-    pushUnique(sameOriginUrl);
-
-    // If running under ais-dev- where Google SSO blocks external Telegram WebViews, try paired public ais-pre- backend
+  const appendPairedAiStudioPreOrigin = (baseOrigin: string) => {
     try {
-      const loc = new URL(window.location.origin);
+      const loc = new URL(baseOrigin);
       const host = loc.hostname.toLowerCase();
       if (host.startsWith('ais-dev-')) {
         const preOrigin = `${loc.protocol}//ais-pre-${host.slice('ais-dev-'.length)}${loc.port ? `:${loc.port}` : ''}`;
@@ -633,6 +627,22 @@ export function resolveApiCandidateUrls(endpointPath: string): string[] {
     } catch {
       // Ignore URL parse errors
     }
+  };
+
+  const configuredBase = getConfiguredApiBaseUrl();
+  if (configuredBase) {
+    pushUnique(`${configuredBase}${cleanPath}`);
+    appendPairedAiStudioPreOrigin(configuredBase);
+  }
+
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    const sameOriginUrl = new URL(cleanPath, window.location.origin).toString();
+    pushUnique(sameOriginUrl);
+
+    // If running under ais-dev- where Google SSO blocks external Telegram WebViews, try paired public ais-pre- backend
+    appendPairedAiStudioPreOrigin(window.location.origin);
+  } else if (candidates.length === 0) {
+    pushUnique(cleanPath);
   }
 
   return candidates;
@@ -646,6 +656,8 @@ export async function fetchApiWithFallback(
     endpointPath.startsWith('http://') || endpointPath.startsWith('https://')
       ? [endpointPath]
       : resolveApiCandidateUrls(endpointPath);
+  const currentOrigin =
+    typeof window !== 'undefined' && window.location?.origin ? window.location.origin.toLowerCase() : '';
 
   let lastResponse: Response | null = null;
   let lastContentType = '';
@@ -654,12 +666,43 @@ export async function fetchApiWithFallback(
 
   for (let i = 0; i < candidates.length; i += 1) {
     const candidateUrl = candidates[i];
+    let isCrossOrigin = false;
+    try {
+      if (currentOrigin) {
+        isCrossOrigin = new URL(candidateUrl, currentOrigin).origin.toLowerCase() !== currentOrigin;
+      }
+    } catch {
+      isCrossOrigin = false;
+    }
+
     try {
       const response = await fetch(candidateUrl, init);
       const contentType = (response.headers.get('content-type') || '').toLowerCase();
       const isJson = contentType.includes('application/json');
+      let isCrossOriginCorsDenied = false;
+      if (isJson && isCrossOrigin && response.status === 403 && i < candidates.length - 1) {
+        try {
+          const cloned = (await response.clone().json()) as { error?: unknown } | null;
+          if (
+            typeof cloned?.error === 'string' &&
+            cloned.error.toLowerCase().includes('cross-origin request denied')
+          ) {
+            isCrossOriginCorsDenied = true;
+          }
+        } catch {
+          // Ignore clone parse failures
+        }
+      }
+
       const isRetryableMissing =
-        !isJson || response.status === 404 || response.status === 405 || response.status === 502 || response.status === 503;
+        !isJson ||
+        response.status === 404 ||
+        response.status === 405 ||
+        response.status === 502 ||
+        response.status === 503 ||
+        response.status === 504 ||
+        isCrossOriginCorsDenied ||
+        (isCrossOrigin && response.status >= 500);
 
       if (!isRetryableMissing || i === candidates.length - 1) {
         return { response, contentType, isJson, usedUrl: candidateUrl };
@@ -699,6 +742,151 @@ export async function safeFetchJson<T>(
     return (await response.json()) as T;
   } catch {
     return null;
+  }
+}
+
+export interface ApiBaseUrlDiagnostics {
+  rawEnvApiBaseUrl: string;
+  envApiBaseUrl: string;
+  envApiBaseUrlInvalid: boolean;
+  localStorageOverrideUrl: string;
+  activeBaseUrl: string;
+  currentOrigin: string;
+  candidateUrls: string[];
+}
+
+export function getApiBaseUrlDiagnostics(): ApiBaseUrlDiagnostics {
+  let rawEnv = '';
+  try {
+    const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+    rawEnv = String(env?.VITE_API_BASE_URL || '').trim();
+  } catch {
+    rawEnv = '';
+  }
+  const envNormalized = normalizeApiBaseUrl(rawEnv);
+
+  let localOverride = '';
+  try {
+    if (typeof localStorage !== 'undefined') {
+      localOverride = normalizeApiBaseUrl(localStorage.getItem(API_BASE_URL_STORAGE_KEY));
+    }
+  } catch {
+    localOverride = '';
+  }
+
+  const currentOrigin =
+    typeof window !== 'undefined' && window.location?.origin ? window.location.origin : '';
+
+  return {
+    rawEnvApiBaseUrl: rawEnv,
+    envApiBaseUrl: envNormalized,
+    envApiBaseUrlInvalid: Boolean(rawEnv && !envNormalized),
+    localStorageOverrideUrl: localOverride,
+    activeBaseUrl: getConfiguredApiBaseUrl(),
+    currentOrigin,
+    candidateUrls: resolveApiCandidateUrls('/api/telegram/check-channels'),
+  };
+}
+
+export interface VerificationServerProbeResult {
+  reachable: boolean;
+  checkedAtMs: number;
+  latencyMs: number | null;
+  usedUrl: string;
+  httpStatus: number | null;
+  contentType: string;
+  error: string | null;
+  candidateUrls: string[];
+}
+
+export async function probeVerificationServerConnection(): Promise<VerificationServerProbeResult> {
+  const checkedAtMs = Date.now();
+  const startedAt = typeof performance !== 'undefined' ? performance.now() : Date.now();
+  const candidateUrls = resolveApiCandidateUrls('/api/telegram/check-channels');
+
+  const evaluateEndpoint = async (endpointPath: string) => {
+    const { response, contentType, isJson, usedUrl } = await fetchApiWithFallback(endpointPath, {
+      method: 'GET',
+      cache: 'no-store',
+    });
+    const elapsed = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+    );
+    return { response, contentType, isJson, usedUrl, elapsed };
+  };
+
+  try {
+    let probe = await evaluateEndpoint('/api/health');
+    if (
+      (!probe.isJson || probe.response.status === 404 || probe.response.status === 405) &&
+      probe.response.status !== 403
+    ) {
+      const configProbe = await evaluateEndpoint('/api/config');
+      if (configProbe.isJson && configProbe.response.ok) {
+        probe = configProbe;
+      }
+    }
+
+    if (probe.isJson && probe.response.ok) {
+      return {
+        reachable: true,
+        checkedAtMs,
+        latencyMs: probe.elapsed,
+        usedUrl: probe.usedUrl,
+        httpStatus: probe.response.status,
+        contentType: probe.contentType,
+        error: null,
+        candidateUrls,
+      };
+    }
+
+    let serverErrorText = '';
+    if (probe.isJson) {
+      try {
+        const body = (await probe.response.clone().json()) as { error?: unknown } | null;
+        if (typeof body?.error === 'string' && body.error.trim()) {
+          serverErrorText = body.error.trim();
+        }
+      } catch {
+        // Ignore parse error
+      }
+    }
+
+    const reason = !probe.isJson
+      ? `Expected JSON from backend but received "${probe.contentType || 'unknown'}" (HTTP ${probe.response.status}) — static preview or SPA fallback detected.`
+      : serverErrorText
+        ? `${serverErrorText} (HTTP ${probe.response.status})`
+        : `Verification endpoint returned HTTP ${probe.response.status}.`;
+
+    return {
+      reachable: false,
+      checkedAtMs,
+      latencyMs: probe.elapsed,
+      usedUrl: probe.usedUrl,
+      httpStatus: probe.response.status,
+      contentType: probe.contentType,
+      error: reason,
+      candidateUrls,
+    };
+  } catch (err) {
+    const elapsed = Math.max(
+      1,
+      Math.round((typeof performance !== 'undefined' ? performance.now() : Date.now()) - startedAt),
+    );
+    return {
+      reachable: false,
+      checkedAtMs,
+      latencyMs: elapsed,
+      usedUrl: candidateUrls[0] || '/api/health',
+      httpStatus: null,
+      contentType: '',
+      error:
+        err instanceof Error && err.message
+          ? `Network / CORS error: ${err.message}`
+          : 'Network error reaching the membership verification server.',
+      candidateUrls,
+    };
   }
 }
 

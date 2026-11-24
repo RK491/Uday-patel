@@ -28,7 +28,9 @@ import {
   claimAchievement,
   claimAdNetworkReward,
   claimAdsgramBotJoinReward,
+  claimCritterReward,
   claimDailyStreak,
+  claimIncubatedEgg,
   claimPromoCode,
   collectEggs,
   completeTask,
@@ -38,6 +40,7 @@ import {
   createPaidTaskOrder,
   createRefundPaidTaskOrder,
   createTopUpPaidTaskOrder,
+  CRITTER_EVENT_REWARDS,
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
   DEFAULT_CHANNELS_CONFIG,
@@ -60,8 +63,10 @@ import {
   getActiveRequiredChannels,
   getActiveReinvestSurgeStatus,
   getCoopFeverProgress,
+  getCritterEventStatus,
   getEffectiveAdminIds,
   getGoldenEggCooldownRemainingMs,
+  getIncubatorStatus,
   getTaskChannelCheckMode,
   getUnifiedUserId,
   getVerifiableClaimedChannelTasks,
@@ -87,6 +92,8 @@ import {
   resolveTaskPricingConfig,
   shouldShowSignUpBonusClaim,
   SIGNUP_BONUS_COINS,
+  speedUpIncubationWithAd,
+  startIncubation,
   type TaskChannelCheckMode,
   upgradeBasket,
   watchAdStep,
@@ -173,9 +180,12 @@ import type {
   DepositOrder,
   DynamicPromoCode,
   EconomyConfig,
+  IncubatorCurrency,
+  IncubatorTierId,
   LanguageCode,
   LeaderboardEntry,
   MaintenanceConfig,
+  MeadowCritterKind,
   NavTab,
   PromoRewardType,
   ReferralRecord,
@@ -248,7 +258,6 @@ import {
   hasTelegramRuntimeContext,
   loadLocalChannelLogs,
   parseStartAppAction,
-  resolveApiUrl,
   safeFetchJson,
   setLocalAdminBotConfig,
   subscribeTelegramAppActivated,
@@ -264,6 +273,7 @@ import { DepositView } from './components/DepositView';
 import { FarmMeadow } from './components/FarmMeadow';
 import { FriendsView } from './components/FriendsView';
 import { CoinIcon, EggIcon } from './components/GameIcons';
+import { HatcheryModal, type HatchedRevealInfo } from './components/HatcheryModal';
 import { LeaderboardView } from './components/LeaderboardView';
 import { MaintenanceScreen } from './components/MaintenanceScreen';
 import { PacksView } from './components/PacksView';
@@ -492,6 +502,12 @@ export default function App() {
     reinvestEggs?: number | null;
     reinvestCoins?: number | null;
     reinvestBonusPercent?: number | null;
+    incubatorTierId?: IncubatorTierId | null;
+    incubatorTierName?: string | null;
+    incubatorSavedLabel?: string | null;
+    critterKind?: MeadowCritterKind | null;
+    critterName?: string | null;
+    critterRewardXp?: number | null;
     mandatory?: boolean;
   }>({
     open: false,
@@ -500,6 +516,8 @@ export default function App() {
     network: null,
   });
   const [showReinvestModal, setShowReinvestModal] = useState(false);
+  const [showHatcheryModal, setShowHatcheryModal] = useState(false);
+  const [hatchedReveal, setHatchedReveal] = useState<HatchedRevealInfo | null>(null);
   const channelLeaveAuditRef = useRef<number>(0);
   const claimPendingAttemptsRef = useRef<{ uid: string; count: number; resolved: boolean }>({
     uid: '',
@@ -1663,7 +1681,7 @@ export default function App() {
         if (tgInit) {
           headers['x-telegram-init-data'] = tgInit;
         }
-        await fetch(resolveApiUrl('/api/referrals'), {
+        await fetchApiWithFallback('/api/referrals', {
           method: 'POST',
           cache: 'no-store',
           headers,
@@ -1767,7 +1785,7 @@ export default function App() {
             hasTgInitData: Boolean(tgInitData),
             hasSessionToken: Boolean(playerSessionTokenRef.current),
           });
-          let response = await fetch(resolveApiUrl(primaryEndpoint), {
+          let { response, isJson } = await fetchApiWithFallback(primaryEndpoint, {
             method: 'POST',
             cache: 'no-store',
             headers: { 'Content-Type': 'application/json' },
@@ -1787,7 +1805,7 @@ export default function App() {
               targetUid,
               refCode,
             });
-            response = await fetch(resolveApiUrl('/api/referrals/apply'), {
+            ({ response, isJson } = await fetchApiWithFallback('/api/referrals/apply', {
               method: 'POST',
               cache: 'no-store',
               headers: { 'Content-Type': 'application/json' },
@@ -1800,11 +1818,10 @@ export default function App() {
                 initData: tgInitData,
                 token: playerSessionTokenRef.current,
               }),
-            });
+            }));
           }
-          const contentType = (response.headers.get('content-type') || '').toLowerCase();
           const payload = (
-            contentType.includes('application/json') ? await response.json().catch(() => null) : null
+            isJson ? await response.json().catch(() => null) : null
           ) as {
             ok?: boolean;
             claimed?: boolean;
@@ -2075,7 +2092,7 @@ export default function App() {
           attempt: claimPendingAttemptsRef.current.count,
         });
 
-        const res = await fetch(resolveApiUrl('/api/referrals/claim-pending'), {
+        const { response: res, isJson } = await fetchApiWithFallback('/api/referrals/claim-pending', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
@@ -2088,7 +2105,7 @@ export default function App() {
             token: playerSessionTokenRef.current,
           }),
         });
-        if (res.ok) {
+        if (res.ok && isJson) {
           const payload = (await res.json().catch(() => null)) as {
             ok?: boolean;
             applied?: boolean;
@@ -2219,11 +2236,12 @@ export default function App() {
           if (playerSessionTokenRef.current) {
             headers.Authorization = `Bearer ${playerSessionTokenRef.current}`;
           }
-          const statsRes = await fetch(resolveApiUrl('/api/referral/stats'), {
+          const statsFetch = await fetchApiWithFallback('/api/referral/stats', {
             cache: 'no-store',
             headers,
           }).catch(() => null);
-          if (statsRes && statsRes.ok && !cancelled) {
+          const statsRes = statsFetch?.response;
+          if (statsRes && statsRes.ok && statsFetch?.isJson && !cancelled) {
             const statsPayload = (await statsRes.json().catch(() => null)) as {
               ok?: boolean;
               invitedBy?: string | null;
@@ -2241,11 +2259,11 @@ export default function App() {
           }
         }
 
-        const res = await fetch(
-          resolveApiUrl(`/api/referrals?userId=${encodeURIComponent(activePlayerId)}`),
+        const { response: res, isJson } = await fetchApiWithFallback(
+          `/api/referrals?userId=${encodeURIComponent(activePlayerId)}`,
           { cache: 'no-store' },
         );
-        if (res.ok && !cancelled) {
+        if (res.ok && isJson && !cancelled) {
           const payload = (await res.json().catch(() => null)) as {
             referrals?: unknown;
             referrer?: string | null;
@@ -2446,7 +2464,7 @@ export default function App() {
         ) as (ChannelVerificationResult & { error?: string }) | null;
 
         let data: ChannelVerificationResult | null = null;
-        const isMissingApi = !isJson || res.status === 404 || res.status === 405;
+        const isMissingApi = !isJson || res.status === 404 || res.status === 405 || res.status >= 502;
 
         if (isMissingApi) {
           const tgNumericId = extractTelegramNumericUserId(effectiveUid);
@@ -2737,7 +2755,7 @@ export default function App() {
           reason?: string;
         } | null;
 
-        const isMissingApi = !isJson || res.status === 404 || res.status === 405;
+        const isMissingApi = !isJson || res.status === 404 || res.status === 405 || res.status >= 502;
         if (isMissingApi) {
           const localBot = getLocalAdminBotConfig();
           if (localBot?.token && normalized.handle) {
@@ -2859,7 +2877,7 @@ export default function App() {
 
       let leftTaskIds: string[] = [];
       try {
-        const res = await fetch(resolveApiUrl('/api/telegram/audit-claimed-channels'), {
+        const { response: res, isJson } = await fetchApiWithFallback('/api/telegram/audit-claimed-channels', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -2873,8 +2891,7 @@ export default function App() {
             })),
           }),
         });
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (contentType.includes('application/json') && res.ok) {
+        if (isJson && res.ok) {
           const data = (await res.json().catch(() => null)) as {
             ok?: boolean;
             leftTaskIds?: string[];
@@ -3554,7 +3571,7 @@ export default function App() {
       let userDmSent = false;
       let userDmReason: string | undefined;
       try {
-        const res = await fetch(resolveApiUrl('/api/withdraw/notify'), {
+        const { response: res, isJson } = await fetchApiWithFallback('/api/withdraw/notify', {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
@@ -3577,8 +3594,7 @@ export default function App() {
             adminNote,
           }),
         });
-        const ct = (res.headers.get('content-type') || '').toLowerCase();
-        if (!ct.includes('application/json') || res.status === 404 || res.status === 405) {
+        if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
           const direct = await sendWithdrawNotifyDirectPreview();
           userDmSent = direct.userDmSent;
           userDmReason = direct.userDmReason;
@@ -3911,7 +3927,7 @@ export default function App() {
       };
     }
     try {
-      const response = await fetch(resolveApiUrl('/api/telegram/sync-channels'), {
+      const { response, isJson } = await fetchApiWithFallback('/api/telegram/sync-channels', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -3924,6 +3940,12 @@ export default function App() {
           getCodeChannelUrl: payload?.getCodeChannelUrl,
         }),
       });
+      if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
+        return {
+          ok: false,
+          error: 'Unable to reach server for Telegram Bot channel sync.',
+        };
+      }
       const data = (await response.json().catch(() => ({}))) as {
         ok?: boolean;
         botConfigured?: boolean;
@@ -4192,7 +4214,7 @@ export default function App() {
         if (tgInitData) {
           headers['x-telegram-init-data'] = tgInitData;
         }
-        const res = await fetch(resolveApiUrl('/api/admin/data-reset'), {
+        const { response: res, isJson } = await fetchApiWithFallback('/api/admin/data-reset', {
           method: 'POST',
           cache: 'no-store',
           headers,
@@ -4205,8 +4227,7 @@ export default function App() {
         });
         window.clearTimeout(requestTimeoutId);
 
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
           return await runFirestoreResetFallback('Server endpoint unavailable');
         }
 
@@ -4296,8 +4317,7 @@ export default function App() {
   ): Promise<{ ok: boolean; error?: string; needsPasscodeSetup?: boolean }> => {
     try {
       const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
-      const endpointUrl = resolveApiUrl('/api/admin/auth');
-      const response = await fetch(endpointUrl, {
+      const { response, isJson } = await fetchApiWithFallback('/api/admin/auth', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -4307,8 +4327,6 @@ export default function App() {
           passcode: passcode.trim(),
         }),
       });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      const isJson = contentType.includes('application/json');
       const payload = (isJson ? await response.json().catch(() => ({})) : {}) as {
         ok?: boolean;
         token?: string;
@@ -4338,7 +4356,8 @@ export default function App() {
         return { ok: true };
       }
 
-      const isMissingApiEndpoint = response.status === 404 || response.status === 405 || !isJson;
+      const isMissingApiEndpoint =
+        response.status === 404 || response.status === 405 || response.status >= 502 || !isJson;
       if (isMissingApiEndpoint) {
         return {
           ok: false,
@@ -4368,7 +4387,7 @@ export default function App() {
   ): Promise<{ ok: boolean; error?: string }> => {
     try {
       const effectivePlayerId = detectedIdentity.playerId || profile.uid || activePlayerId;
-      const response = await fetch(resolveApiUrl('/api/admin/setup-passcode'), {
+      const { response, isJson } = await fetchApiWithFallback('/api/admin/setup-passcode', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -4378,9 +4397,8 @@ export default function App() {
           passcode: passcode.trim(),
         }),
       });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
       const payload = (
-        contentType.includes('application/json') ? await response.json().catch(() => ({})) : {}
+        isJson ? await response.json().catch(() => ({})) : {}
       ) as {
         ok?: boolean;
         token?: string;
@@ -4405,6 +4423,12 @@ export default function App() {
         showToast('Initial Admin Passcode saved & unlocked!');
         return { ok: true };
       }
+      if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
+        return {
+          ok: false,
+          error: 'Admin verification server unavailable. Open from the live Alpha Gram backend host.',
+        };
+      }
       return {
         ok: false,
         error: payload.error || 'Unable to set initial Admin Passcode.',
@@ -4421,8 +4445,7 @@ export default function App() {
     setLoadingChannelLogs(true);
     setChannelLogsError(null);
     try {
-      const endpointUrl = resolveApiUrl('/api/admin/channel-logs');
-      const response = await fetch(endpointUrl, {
+      const { response, isJson } = await fetchApiWithFallback('/api/admin/channel-logs', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -4433,8 +4456,7 @@ export default function App() {
           limit: 5,
         }),
       });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+      if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
         const localLogs = loadLocalChannelLogs() as unknown as ChannelCheckDiagnosticLog[];
         setChannelDiagnosticLogs(localLogs.slice(0, 5));
         setChannelLogsError(null);
@@ -4468,8 +4490,7 @@ export default function App() {
       setLoadingSystemDiagnostics(true);
       setSystemDiagnosticsError(null);
       try {
-        const endpointUrl = resolveApiUrl('/api/admin/system-diagnostics');
-        const response = await fetch(endpointUrl, {
+        const { response, isJson } = await fetchApiWithFallback('/api/admin/system-diagnostics', {
           method: 'POST',
           cache: 'no-store',
           headers: { 'Content-Type': 'application/json' },
@@ -4480,8 +4501,7 @@ export default function App() {
             forceHeartbeat,
           }),
         });
-        const contentType = (response.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+        if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
           const fsStart = Date.now();
           const fsConnected = await testFirestoreConnection();
           const fsLatencyMs = Math.max(1, Date.now() - fsStart);
@@ -4596,8 +4616,7 @@ export default function App() {
     channelsOverride?: typeof activeRequiredChannels,
   ) => {
     try {
-      const endpointUrl = resolveApiUrl('/api/telegram/test-channels');
-      const response = await fetch(endpointUrl, {
+      const { response, isJson } = await fetchApiWithFallback('/api/telegram/test-channels', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -4608,8 +4627,7 @@ export default function App() {
           requiredChannels: channelsOverride,
         }),
       });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+      if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
         const localBot = getLocalAdminBotConfig();
         const targetChannels = channelsOverride && channelsOverride.length > 0 ? channelsOverride : activeRequiredChannels;
         if (!localBot) {
@@ -4908,7 +4926,7 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(resolveApiUrl('/api/admin/bot-config/get'), {
+      const { response: res, isJson } = await fetchApiWithFallback('/api/admin/bot-config/get', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -4918,8 +4936,7 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+      if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
         applyLocalFallback();
         return;
       }
@@ -5001,7 +5018,7 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(resolveApiUrl('/api/admin/bot-config'), {
+      const { response: res, isJson } = await fetchApiWithFallback('/api/admin/bot-config', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -5012,8 +5029,7 @@ export default function App() {
           botToken,
         }),
       });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+      if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
         return saveViaDirectTelegramPreview();
       }
       const payload = (await res.json().catch(() => ({}))) as {
@@ -5080,7 +5096,7 @@ export default function App() {
     };
 
     try {
-      const res = await fetch(resolveApiUrl('/api/admin/bot-config/clear'), {
+      const { response: res, isJson } = await fetchApiWithFallback('/api/admin/bot-config/clear', {
         method: 'POST',
         cache: 'no-store',
         headers: { 'Content-Type': 'application/json' },
@@ -5090,8 +5106,7 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+      if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
         return clearLocalFallback();
       }
       const payload = (await res.json().catch(() => ({}))) as {
@@ -5285,7 +5300,7 @@ export default function App() {
       };
 
       try {
-        const res = await fetch(resolveApiUrl('/api/admin/broadcast/stats'), {
+        const { response: res, isJson } = await fetchApiWithFallback('/api/admin/broadcast/stats', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
@@ -5294,8 +5309,7 @@ export default function App() {
             excludeBanned,
           }),
         });
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+        if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
           return buildStaticStats();
         }
         const payload = (await res.json().catch(() => ({}))) as {
@@ -5316,7 +5330,7 @@ export default function App() {
 
   const handleSyncBotSubscribers = useCallback(async () => {
     try {
-      const res = await fetch(resolveApiUrl('/api/admin/telegram/sync-bot'), {
+      const { response: res, isJson } = await fetchApiWithFallback('/api/admin/telegram/sync-bot', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5324,8 +5338,7 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
-      const contentType = (res.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || res.status === 404 || res.status === 405) {
+      if (!isJson || res.status === 404 || res.status === 405 || res.status >= 502) {
         const tgCount = recentPlayers.filter((p) => Boolean(extractTelegramNumericUserId(p.uid))).length;
         showToast(`Static preview: ${tgCount} active Telegram farm players ready.`);
         return {
@@ -5586,7 +5599,7 @@ export default function App() {
     };
 
     try {
-      const response = await fetch(resolveApiUrl('/api/admin/broadcast'), {
+      const { response, isJson } = await fetchApiWithFallback('/api/admin/broadcast', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -5595,8 +5608,7 @@ export default function App() {
           initData: getTelegramInitData(),
         }),
       });
-      const contentType = (response.headers.get('content-type') || '').toLowerCase();
-      if (!contentType.includes('application/json') || response.status === 404 || response.status === 405) {
+      if (!isJson || response.status === 404 || response.status === 405 || response.status >= 502) {
         return sendDirectFromBrowserPreview();
       }
       const payload = (await response.json().catch(() => ({}))) as {
@@ -6110,6 +6122,229 @@ export default function App() {
     })();
   };
 
+  const handleStartIncubation = (
+    tierId: IncubatorTierId,
+    currency: IncubatorCurrency,
+  ) => {
+    void (async () => {
+      if (!(await ensureMustJoinVerified('incubate a mystery egg'))) return;
+      await ensurePromiseRef.current;
+      const now = Date.now();
+      const res = startIncubation(latestProfileRef.current, tierId, currency, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playPurchaseSuccessSound(soundsEnabled);
+      triggerHapticFeedback('medium');
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(`${res.tier.name} warming up (${res.tier.durationHours}h)!`);
+    })();
+  };
+
+  const executeSpeedUpIncubator = useCallback(() => {
+    const now = Date.now();
+    const res = speedUpIncubationWithAd(latestProfileRef.current, now);
+    if ('error' in res) {
+      showToast(res.error);
+      return;
+    }
+    playClaimSound(soundsEnabled);
+    triggerHapticFeedback('success');
+    void persistMutation({ nextProfile: res.profile });
+    if (res.isNowReady) {
+      triggerRewardConfetti();
+      showToast(`${res.tier.name} is ready to hatch right now!`);
+    } else {
+      const savedMin = Math.max(1, Math.round(res.savedMs / 60_000));
+      const label =
+        savedMin >= 60
+          ? `${Math.floor(savedMin / 60)}h ${savedMin % 60}m`
+          : `${savedMin}m`;
+      showToast(`Incubator boosted (-${label})!`);
+    }
+  }, [persistMutation, showToast, soundsEnabled]);
+
+  const handleSpeedUpIncubatorWithAd = async () => {
+    if (watchingAdLoading) return;
+    if (!(await ensureMustJoinVerified('speed up egg incubator'))) return;
+    await ensurePromiseRef.current;
+    const now = Date.now();
+    const status = getIncubatorStatus(latestProfileRef.current, now);
+    if (!status.hasActive || !status.tier) {
+      showToast('No egg is currently incubating.');
+      return;
+    }
+    if (status.status === 'ready') {
+      setShowHatcheryModal(true);
+      return;
+    }
+    if (!status.canSpeedUpWithAd) {
+      showToast('All 2 Ad Speed-Ups already used on this egg.');
+      return;
+    }
+    const savedMins = Math.max(1, Math.round(status.nextAdSavedMs / 60_000));
+    const savedLabel =
+      savedMins >= 60
+        ? `-${Math.floor(savedMins / 60)}h ${savedMins % 60}m`
+        : `-${savedMins}m`;
+
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
+    setActiveAdAction(null);
+    try {
+      const external = await tryRunExternalRewardedAd(adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          executeSpeedUpIncubator();
+        } else {
+          showToast('Complete the ad to speed up your egg.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        kind: 'incubator_speedup',
+        incubatorTierId: status.tier.id,
+        incubatorTierName: status.tier.name,
+        incubatorSavedLabel: savedLabel,
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
+    } finally {
+      setWatchingAdLoading(false);
+    }
+  };
+
+  const handleClaimHatchedEgg = () => {
+    void (async () => {
+      if (!(await ensureMustJoinVerified('hatch incubated egg'))) return;
+      await ensurePromiseRef.current;
+      const now = Date.now();
+      const current = latestProfileRef.current;
+      const res = claimIncubatedEgg(current, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playGoldenEggSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      setHatchedReveal({
+        breed: res.hatchedBreed,
+        xpGained: res.xpGained,
+        tierName: res.tier.name,
+      });
+      await persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+        activateReferral: res.shouldActivateReferral,
+      });
+      if (res.shouldActivateReferral && current.referredBy) {
+        void (async () => {
+          const actRes = await safeFetchJson<{ ok?: boolean; botDmSent?: boolean }>('/api/referrals/activate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              referredUid: res.profile.uid,
+              referrerUid: current.referredBy,
+              referredName: res.profile.displayName,
+              referredHandle: res.profile.handle,
+              initData: getTelegramInitData(),
+              token: playerSessionTokenRef.current,
+            }),
+          });
+          if (!actRes?.botDmSent) {
+            await safeFetchJson('/api/referrals/notify', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                event: 'referral_joined',
+                referrerUid: current.referredBy,
+                referredUid: res.profile.uid,
+                referredName: res.profile.displayName,
+                referredHandle: res.profile.handle,
+                rewardCoins: economyConfigRef.current.perReferRewardCoins,
+                initData: getTelegramInitData(),
+                token: playerSessionTokenRef.current,
+              }),
+            });
+          }
+        })();
+      }
+      showToast(`Hatched 1× ${res.pack.name} (+${res.pack.eggsPerHour} eggs/h)!`);
+    })();
+  };
+
+  const executeCritterChaseReward = useCallback(
+    (critterKind: MeadowCritterKind) => {
+      const now = Date.now();
+      const res = claimCritterReward(latestProfileRef.current, critterKind, now);
+      if ('error' in res) {
+        showToast(res.error);
+        return;
+      }
+      playGoldenEggSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      triggerRewardConfetti();
+      void persistMutation({
+        nextProfile: res.profile,
+        transaction: res.transaction,
+      });
+      showToast(
+        `${res.critterName} chased! +${res.coinsAwarded} Coins & +${res.xpAwarded} XP!`,
+      );
+    },
+    [persistMutation, showToast, soundsEnabled],
+  );
+
+  const handleCritterTap = async (critterKind: MeadowCritterKind) => {
+    if (watchingAdLoading) return;
+    playSoftTapSound(soundsEnabled);
+    triggerHapticFeedback('medium');
+    if (!(await ensureMustJoinVerified('claim Fox / Crow bonus'))) return;
+    await ensurePromiseRef.current;
+    const now = Date.now();
+    const status = getCritterEventStatus(latestProfileRef.current, now);
+    if (!status.ready) {
+      const mins = Math.max(1, Math.ceil(status.remainingMs / 60_000));
+      showToast(`Meadow is safe! Next patrol check in ${mins}m.`);
+      return;
+    }
+    const meta = CRITTER_EVENT_REWARDS[critterKind] ?? CRITTER_EVENT_REWARDS.fox;
+
+    setWatchingAdLoading(true);
+    setActiveAdNetwork(null);
+    setActiveAdAction(null);
+    try {
+      const external = await tryRunExternalRewardedAd(adConfig);
+      if (external.handled) {
+        if (external.rewarded) {
+          executeCritterChaseReward(critterKind);
+        } else {
+          showToast('Complete the ad to claim your Fox/Crow chase bonus.');
+        }
+        return;
+      }
+      setAdModalState({
+        open: true,
+        kind: 'critter_chase',
+        critterKind,
+        critterName: meta.name,
+        critterRewardXp: meta.xp,
+        notice: external.message ?? null,
+        network: null,
+        mandatory: false,
+      });
+    } finally {
+      setWatchingAdLoading(false);
+    }
+  };
+
   const handleToggleTelegramReminders = useCallback(() => {
     const current = latestProfileRef.current;
     const nextEnabled = current.telegramRemindersEnabled === false;
@@ -6405,6 +6640,9 @@ export default function App() {
           onVerifyAdminPasscode={handleVerifyAdminPasscode}
           onSetupInitialAdminPasscode={handleSetupInitialAdminPasscode}
           onTestChannels={handleTestChannelsDiagnostic}
+          channelVerification={channelVerification}
+          channelCheckError={channelCheckError}
+          onRetestChannelVerification={() => handleCheckChannels({ forceRefresh: true, silent: true })}
           channelDiagnosticLogs={channelDiagnosticLogs}
           loadingChannelLogs={loadingChannelLogs}
           channelLogsError={channelLogsError}
@@ -6478,6 +6716,10 @@ export default function App() {
             setActiveTab('packs');
           }}
           onOpenWithdraw={() => openSubView('withdraw')}
+          onOpenHatchery={() => {
+            setHatchedReveal(null);
+            setShowHatcheryModal(true);
+          }}
           onToggleTelegramReminders={handleToggleTelegramReminders}
           onActivateBooster={handleActivateBooster}
           onPurchaseAutoHarvestDrone={handlePurchaseAutoHarvestDrone}
@@ -6982,6 +7224,12 @@ export default function App() {
               onOpenYourFarm={() => openSubView('your_farm')}
               onOpenWithdraw={() => openSubView('withdraw')}
               onOpenReinvest={() => setShowReinvestModal(true)}
+              onOpenHatchery={() => {
+                setHatchedReveal(null);
+                setShowHatcheryModal(true);
+              }}
+              onSpeedUpIncubator={() => void handleSpeedUpIncubatorWithAd()}
+              onCritterTap={(critter) => void handleCritterTap(critter)}
               onChickenTap={() => {
                 playChickenCluckSound(soundsEnabled);
                 triggerHapticFeedback('light');
@@ -7094,7 +7342,9 @@ export default function App() {
             rewardCoins={
               adModalState.kind === 'adsgram_task'
                 ? ADSGRAM_BOT_JOIN_TASK.rewardCoins
-                : (netDef?.rewardCoins ?? null)
+                : adModalState.kind === 'critter_chase'
+                  ? (CRITTER_EVENT_REWARDS[adModalState.critterKind ?? 'fox']?.coins ?? 35)
+                  : (netDef?.rewardCoins ?? null)
             }
             pendingEggs={adModalState.pendingEggs ?? null}
             promoCode={adModalState.promoCode ?? null}
@@ -7105,6 +7355,12 @@ export default function App() {
             reinvestEggs={adModalState.reinvestEggs ?? null}
             reinvestCoins={adModalState.reinvestCoins ?? null}
             reinvestBonusPercent={adModalState.reinvestBonusPercent ?? null}
+            incubatorTierId={adModalState.incubatorTierId ?? null}
+            incubatorTierName={adModalState.incubatorTierName ?? null}
+            incubatorSavedLabel={adModalState.incubatorSavedLabel ?? null}
+            critterKind={adModalState.critterKind ?? null}
+            critterName={adModalState.critterName ?? null}
+            critterRewardXp={adModalState.critterRewardXp ?? null}
             coopFeverAdsCollected={getCoopFeverProgress(profile, nowMs).adsCollected}
             coopFeverAdsRequired={COOP_FEVER_REQUIRED_ADS}
             fallbackNotice={adModalState.notice}
@@ -7128,6 +7384,10 @@ export default function App() {
                 );
               } else if (currentModal.kind === 'reinvest' && currentModal.reinvestEggs) {
                 executeReinvest(currentModal.reinvestEggs);
+              } else if (currentModal.kind === 'incubator_speedup') {
+                executeSpeedUpIncubator();
+              } else if (currentModal.kind === 'critter_chase') {
+                executeCritterChaseReward(currentModal.critterKind ?? 'fox');
               } else if (currentModal.kind === 'ad_network' && currentModal.network) {
                 handleClaimAdNetwork(currentModal.network);
               } else if (currentModal.kind === 'adsgram_task') {
@@ -7150,6 +7410,10 @@ export default function App() {
                 showToast('Ad cancelled — miner was not purchased.');
               } else if (cancelledKind === 'reinvest') {
                 showToast('Ad cancelled — reinvest was not completed.');
+              } else if (cancelledKind === 'incubator_speedup') {
+                showToast('Ad cancelled — incubator timer was not sped up.');
+              } else if (cancelledKind === 'critter_chase') {
+                showToast('Ad cancelled — Fox/Crow chase bonus not claimed.');
               } else {
                 showToast('Ad closed early — reward not claimed.');
               }
@@ -7166,6 +7430,22 @@ export default function App() {
           loading={watchingAdLoading}
           onInvest={(eggsAmount) => void handleStartReinvestWithAd(eggsAmount)}
           onClose={() => setShowReinvestModal(false)}
+        />
+      )}
+
+      {showHatcheryModal && (
+        <HatcheryModal
+          profile={profile}
+          loading={watchingAdLoading}
+          hatchedReveal={hatchedReveal}
+          onStartIncubation={handleStartIncubation}
+          onSpeedUpWithAd={() => void handleSpeedUpIncubatorWithAd()}
+          onClaimHatched={handleClaimHatchedEgg}
+          onClearReveal={() => setHatchedReveal(null)}
+          onClose={() => {
+            setHatchedReveal(null);
+            setShowHatcheryModal(false);
+          }}
         />
       )}
 

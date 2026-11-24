@@ -9,9 +9,20 @@ import {
   FREE_EGGS_PER_AD,
   sanitizeExternalUrl,
 } from '../game/economy';
-import type { AdConfig, ChickenBreedId } from '../types/farm';
+import type {
+  AdConfig,
+  ChickenBreedId,
+  IncubatorTierId,
+  MeadowCritterKind,
+} from '../types/farm';
 import animeHenMascot from '../assets/images/anime_hen_mascot_1795509839642.jpg';
-import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
+import {
+  ChickenSprite,
+  CoinIcon,
+  CritterSprite,
+  EggIcon,
+  IncubatorNestEggSprite,
+} from './GameIcons';
 
 export type ModalAdActionKind =
   | 'startup'
@@ -22,6 +33,8 @@ export type ModalAdActionKind =
   | 'adsgram_task'
   | 'coop_fever'
   | 'reinvest'
+  | 'incubator_speedup'
+  | 'critter_chase'
   | 'watch_ad';
 
 interface RewardedAdModalProps {
@@ -41,6 +54,12 @@ interface RewardedAdModalProps {
   reinvestEggs?: number | null;
   reinvestCoins?: number | null;
   reinvestBonusPercent?: number | null;
+  incubatorTierId?: IncubatorTierId | null;
+  incubatorTierName?: string | null;
+  incubatorSavedLabel?: string | null;
+  critterKind?: MeadowCritterKind | null;
+  critterName?: string | null;
+  critterRewardXp?: number | null;
   fallbackNotice?: string | null;
   mandatory?: boolean;
   onComplete: () => void;
@@ -64,6 +83,12 @@ export function RewardedAdModal({
   reinvestEggs,
   reinvestCoins,
   reinvestBonusPercent,
+  incubatorTierId,
+  incubatorTierName,
+  incubatorSavedLabel,
+  critterKind,
+  critterName,
+  critterRewardXp,
   fallbackNotice,
   mandatory = false,
   onComplete,
@@ -123,6 +148,8 @@ export function RewardedAdModal({
     if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins';
     if (actionKind === 'coop_fever') return `3× Coop Fever (${feverNext}/${feverReq})`;
     if (actionKind === 'reinvest') return `Reinvest Ad (+${safeReinvestBonusPercent}% ${reinvestBonusTag})`;
+    if (actionKind === 'incubator_speedup') return 'Incubator Speed-Up';
+    if (actionKind === 'critter_chase') return 'Meadow Guard Bonus';
     if (networkLabel) return `${networkLabel} · Earn Coins`;
     return `Get Free Eggs (${watchedCount + 1}/10)`;
   })();
@@ -135,6 +162,14 @@ export function RewardedAdModal({
     if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins & Clicks';
     if (actionKind === 'coop_fever') return 'Charge 3× Coop Fever Rush';
     if (actionKind === 'reinvest') return `Confirm ${safeReinvestEggs.toLocaleString()} Eggs Reinvest`;
+    if (actionKind === 'incubator_speedup') {
+      return `Warm Up ${incubatorTierName || 'Incubator Egg'}`;
+    }
+    if (actionKind === 'critter_chase') {
+      return critterKind === 'crow'
+        ? `Shooed ${critterName || 'Farmyard Crow'}!`
+        : `Chased ${critterName || 'Sneaky Red Fox'}!`;
+    }
     if (networkLabel) return `${networkLabel} Watch & Earn`;
     return 'Watch & Earn Free Eggs';
   })();
@@ -171,6 +206,16 @@ export function RewardedAdModal({
         safeReinvestBonusPercent > 5 ? 'Surge Bonus' : 'extra'
       }) into +${safeReinvestCoins.toLocaleString()} coins. Does not count toward the 30-ad Withdraw criteria.`;
     }
+    if (actionKind === 'incubator_speedup') {
+      return `Complete this short ad to speed up your incubating egg by ${
+        incubatorSavedLabel || '50%'
+      } and get closer to hatching a new hen!`;
+    }
+    if (actionKind === 'critter_chase') {
+      return `Great reflex guarding the coop! Complete this short ad to claim +${
+        rewardCoins ?? 35
+      } bonus coins & +${critterRewardXp ?? 8} XP.`;
+    }
     if (hasCoinReward) {
       return `Watch until the timer ends to earn +${rewardCoins} coins directly to your wallet.`;
     }
@@ -194,6 +239,12 @@ export function RewardedAdModal({
     }
     if (actionKind === 'reinvest') {
       return `Complete Reinvest (+${safeReinvestCoins.toLocaleString()} Coins)`;
+    }
+    if (actionKind === 'incubator_speedup') {
+      return `Apply ${incubatorSavedLabel || 'Speed-Up'} to Egg`;
+    }
+    if (actionKind === 'critter_chase') {
+      return `Claim +${rewardCoins ?? 35} Coins & +${critterRewardXp ?? 8} XP`;
     }
     if (hasCoinReward) return `Claim +${rewardCoins} Coins`;
     return `Claim +${watchAdEggAmount} Free Eggs`;
@@ -230,6 +281,10 @@ export function RewardedAdModal({
             <div className="animate-clay-float w-20 h-20 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden">
               {actionKind === 'buy_chicken' && chickenBreed ? (
                 <ChickenSprite breed={chickenBreed} className="w-14 h-14" />
+              ) : actionKind === 'incubator_speedup' ? (
+                <IncubatorNestEggSprite tier={incubatorTierId ?? 'golden'} className="w-14 h-14 animate-egg-wiggle" />
+              ) : actionKind === 'critter_chase' && critterKind ? (
+                <CritterSprite kind={critterKind} className="w-14 h-14" />
               ) : actionKind === 'watch_ad' ? (
                 <EggIcon className="w-14 h-14" />
               ) : actionKind === 'coop_fever' ? (
@@ -310,7 +365,16 @@ export function RewardedAdModal({
           {hasCoinReward && (
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
               <CoinIcon className="w-4 h-4" />
-              <span className="font-mono-num">+{rewardCoins} coins</span>
+              <span className="font-mono-num">
+                +{rewardCoins} coins{actionKind === 'critter_chase' && critterRewardXp ? ` · +${critterRewardXp} XP` : ''}
+              </span>
+            </div>
+          )}
+
+          {actionKind === 'incubator_speedup' && incubatorSavedLabel && (
+            <div className="inline-flex items-center gap-1.5 rounded-xl bg-amber-100/80 dark:bg-amber-950/60 border border-amber-300/70 dark:border-amber-700/50 px-3 py-1 text-xs font-extrabold text-amber-800 dark:text-amber-300">
+              <Timer className="w-4 h-4" />
+              <span className="font-mono-num">{incubatorSavedLabel} Incubator Time</span>
             </div>
           )}
 

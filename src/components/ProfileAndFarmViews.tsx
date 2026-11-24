@@ -29,6 +29,7 @@ import {
   CHICKEN_PACKS,
   FEED_BOOSTER_COST_COINS,
   getAchievementsProgress,
+  getIncubatorStatus,
   getXpForLevel,
   isAdminPlayerId,
   isAutoHarvestDroneActive,
@@ -44,7 +45,13 @@ import type {
 } from '../types/farm';
 import { LANGUAGE_OPTIONS, t } from '../utils/i18n';
 import type { ThemeMode } from '../utils/theme';
-import { ChickenSprite, CoinIcon, EggIcon, PlayerAvatar } from './GameIcons';
+import {
+  ChickenSprite,
+  CoinIcon,
+  EggIcon,
+  IncubatorNestEggSprite,
+  PlayerAvatar,
+} from './GameIcons';
 import { PWAInstallButton } from './PWAControls';
 
 interface ProfileViewProps {
@@ -367,6 +374,7 @@ interface YourFarmViewProps {
   onUpgradeBasket: () => void;
   onGoPacks: () => void;
   onOpenWithdraw?: () => void;
+  onOpenHatchery?: () => void;
   onToggleTelegramReminders?: () => void;
   onActivateBooster?: () => void;
   onPurchaseAutoHarvestDrone?: (
@@ -382,6 +390,7 @@ export function YourFarmView({
   onBack,
   onUpgradeBasket,
   onGoPacks,
+  onOpenHatchery,
   onToggleTelegramReminders,
   onActivateBooster,
   onPurchaseAutoHarvestDrone,
@@ -482,6 +491,48 @@ export function YourFarmView({
           </button>
         </div>
       </div>
+
+      {/* Egg Incubator / Hatchery Card */}
+      {onOpenHatchery && (() => {
+        const inc = getIncubatorStatus(profile, liveNowMs);
+        const remMin = Math.floor(inc.remainingMs / 60_000);
+        const remHrs = Math.floor(remMin / 60);
+        const remRemMin = remMin % 60;
+        return (
+          <div className="clay-card p-4 flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <div className="w-11 h-11 rounded-2xl clay-icon-well-amber flex items-center justify-center shrink-0">
+                <IncubatorNestEggSprite
+                  tier={inc.tier?.id ?? 'golden'}
+                  ready={inc.status === 'ready'}
+                  className="w-8 h-8"
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                  Egg Incubator &amp; Hatchery
+                </div>
+                <div className="text-xs text-stone-500 dark:text-stone-400">
+                  {inc.status === 'ready'
+                    ? 'Egg is ready to hatch! Open to claim your hen.'
+                    : inc.status === 'incubating' && inc.tier
+                      ? `${inc.tier.name} · ${remHrs}h ${remRemMin}m left (${inc.progressPct}%)`
+                      : `Hatch mystery hens from eggs or coins · Hatched: ${inc.hatchedCount}`}
+                </div>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={onOpenHatchery}
+              className={`clay-btn px-3.5 min-h-[40px] rounded-xl text-xs font-extrabold shrink-0 ${
+                inc.status === 'ready' ? 'clay-btn-emerald' : 'clay-btn-amber'
+              }`}
+            >
+              {inc.status === 'ready' ? 'Hatch!' : inc.status === 'incubating' ? 'View' : 'Open'}
+            </button>
+          </div>
+        );
+      })()}
 
       {/* Coop Boosters Card */}
       {onActivateBooster && (

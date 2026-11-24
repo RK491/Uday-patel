@@ -360,6 +360,10 @@ function toFirestoreProfilePayload(profile: UserFarmProfile, isCreate: boolean) 
         autoHarvestUntilMs: profile.autoHarvestUntilMs,
         telegramRemindersEnabled: profile.telegramRemindersEnabled,
         lastReinvestDate: profile.lastReinvestDate,
+        incubatorState: profile.incubatorState,
+        incubatorHatchedCount: profile.incubatorHatchedCount,
+        lastCritterEventAtMs: profile.lastCritterEventAtMs,
+        critterChasedCount: profile.critterChasedCount,
         resetEpochMs: profile.resetEpochMs,
       },
     ),
@@ -435,6 +439,10 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     autoHarvestUntilMs,
     telegramRemindersEnabled,
     lastReinvestDate,
+    incubatorState,
+    incubatorHatchedCount,
+    lastCritterEventAtMs,
+    critterChasedCount,
     resetEpochMs,
   } = decodeAchievementsAndAds(
     d.claimedAchievementIds,
@@ -496,6 +504,10 @@ function parseProfileDoc(d: Record<string, unknown>, fallbackId: string): UserFa
     claimedReferralMilestones: Array.isArray(d.claimedReferralMilestones)
       ? (d.claimedReferralMilestones as number[])
       : [],
+    incubatorState,
+    incubatorHatchedCount,
+    lastCritterEventAtMs,
+    critterChasedCount,
     resetEpochMs: resetEpochMs > 0 ? resetEpochMs : undefined,
   };
 }

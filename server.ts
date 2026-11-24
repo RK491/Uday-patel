@@ -4191,8 +4191,8 @@ async function startServer() {
         return true;
       }
       if (
-        hostname === 'web.telegram.org' ||
-        hostname.endsWith('.web.telegram.org') ||
+        hostname === 'telegram.org' ||
+        hostname.endsWith('.telegram.org') ||
         hostname === 't.me'
       ) {
         return originUrl.protocol === 'https:';
@@ -4200,7 +4200,8 @@ async function startServer() {
       if (
         originUrl.protocol === 'https:' &&
         hostname.endsWith('.run.app') &&
-        servicePrefixes.some((prefix) => hostname.startsWith(prefix))
+        (servicePrefixes.some((prefix) => hostname.startsWith(prefix)) ||
+          requestHosts.some((h) => expandCloudRunOrigins(`https://${h}`).includes(originNormalized)))
       ) {
         return true;
       }
@@ -6310,7 +6311,7 @@ async function startServer() {
       });
       return;
     }
-    if (rawInitData) {
+    if (rawInitData && activeBotToken) {
       const verified = verifyTelegramInitData(rawInitData, activeBotToken, { allowClockSkew: true });
       if (!verified.valid || !verified.playerId) {
         res.status(401).json({ ok: false, error: 'Invalid or expired Telegram session signature.' });
@@ -8488,6 +8489,10 @@ async function startServer() {
   if (getTelegramBotToken()) {
     ensureBotPollerRunning();
   }
+
+  app.get('/api/health', (_req, res) => {
+    res.json({ ok: true, status: 'ok', timeMs: Date.now() });
+  });
 
   app.all('/api/*', (_req, res) => {
     res.status(404).json({ ok: false, error: 'API route not found' });
