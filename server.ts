@@ -100,19 +100,45 @@ import {
   saveReferral,
 } from './src/server/referralStorage.ts';
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+const currentDir = (() => {
+  try {
+    if (typeof import.meta?.url === 'string' && import.meta.url) {
+      return path.dirname(fileURLToPath(import.meta.url));
+    }
+  } catch {
+    // Fall back when bundled in CommonJS serverless contexts
+  }
+  return process.cwd();
+})();
+
+const IS_SERVERLESS =
+  process.env.NETLIFY === 'true' ||
+  Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+  Boolean(process.env.LAMBDA_TASK_ROOT) ||
+  Boolean(process.env.VERCEL);
+
+const SERVER_DATA_DIR = IS_SERVERLESS
+  ? path.resolve('/tmp', 'alphagram_data')
+  : path.resolve(currentDir, '.data');
 
 let firebaseHostingProjectId = '';
 
+function resolveFirebaseConfigPath(): string | undefined {
+  const candidates = [
+    path.resolve(currentDir, 'firebase-applet-config.json'),
+    path.resolve(currentDir, '..', 'firebase-applet-config.json'),
+    path.resolve(process.cwd(), 'firebase-applet-config.json'),
+    path.resolve(process.cwd(), '..', 'firebase-applet-config.json'),
+    ...(process.env.LAMBDA_TASK_ROOT
+      ? [path.resolve(process.env.LAMBDA_TASK_ROOT, 'firebase-applet-config.json')]
+      : []),
+  ];
+  return candidates.find((p) => fs.existsSync(p));
+}
+
 function initServerFirestore(): Firestore | null {
   try {
-    const candidates = [
-      path.resolve(__dirname, 'firebase-applet-config.json'),
-      path.resolve(__dirname, '..', 'firebase-applet-config.json'),
-      path.resolve(process.cwd(), 'firebase-applet-config.json'),
-    ];
-    const configPath = candidates.find((p) => fs.existsSync(p));
+    const configPath = resolveFirebaseConfigPath();
     if (!configPath) return null;
     const raw = fs.readFileSync(configPath, 'utf8');
     const cfg = JSON.parse(raw) as Record<string, string>;
@@ -330,7 +356,7 @@ const ADMIN_TELEGRAM_IDS = (process.env.ADMIN_TELEGRAM_IDS || '')
   .map((s) => s.trim())
   .filter(Boolean);
 
-const BOT_CONFIG_FILE = path.resolve(__dirname, '.data', 'bot_config.json');
+const BOT_CONFIG_FILE = path.resolve(SERVER_DATA_DIR, 'bot_config.json');
 
 interface RuntimeBotConfig {
   token: string;
@@ -363,11 +389,15 @@ let runtimeBotConfig: RuntimeBotConfig | null = loadRuntimeBotConfigFromDisk();
 
 function saveRuntimeBotConfigToDisk(cfg: RuntimeBotConfig): void {
   runtimeBotConfig = cfg;
-  const dir = path.dirname(BOT_CONFIG_FILE);
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+  try {
+    const dir = path.dirname(BOT_CONFIG_FILE);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(BOT_CONFIG_FILE, JSON.stringify(cfg), { encoding: 'utf8', mode: 0o600 });
+  } catch {
+    // Non-fatal on read-only containers
   }
-  fs.writeFileSync(BOT_CONFIG_FILE, JSON.stringify(cfg), { encoding: 'utf8', mode: 0o600 });
 }
 
 function clearRuntimeBotConfigOnDisk(): void {
@@ -419,7 +449,7 @@ interface ClaimedAdminPasscodeRecord {
   updatedAtMs: number;
 }
 
-const ADMIN_SECURITY_FILE = path.resolve(__dirname, '.data', 'admin_security.json');
+const ADMIN_SECURITY_FILE = path.resolve(SERVER_DATA_DIR, 'admin_security.json');
 let inMemoryClaimedAdminPasscode: ClaimedAdminPasscodeRecord | null = null;
 
 function hashPasscodeScrypt(passcode: string, saltHex?: string): { salt: string; hash: string } {
@@ -548,12 +578,29 @@ async function verifyAdminPasscodeAsync(provided: string): Promise<{
   };
 }
 
-const SESSION_SECRET_FILE = path.resolve(__dirname, '.data', 'session_secret.key');
+const SESSION_SECRET_FILE = path.resolve(SERVER_DATA_DIR, 'session_secret.key');
 
 function resolveSessionSigningSecret(): string {
   const envSecret = (process.env.SESSION_SECRET || '').trim();
   if (envSecret.length >= 32) {
     return envSecret;
+  }
+  if (IS_SERVERLESS) {
+    const serverSeed = [
+      process.env.ADMIN_PASSCODE || '',
+      process.env.TELEGRAM_BOT_TOKEN || '',
+      process.env.NETLIFY_SITE_ID || process.env.SITE_ID || '',
+      process.env.URL || '',
+      firebaseHostingProjectId || '',
+    ]
+      .filter(Boolean)
+      .join('|');
+    if (serverSeed) {
+      return crypto
+        .createHmac('sha256', 'alphagram-serverless-session-v1')
+        .update(serverSeed)
+        .digest('hex');
+    }
   }
   try {
     if (fs.existsSync(SESSION_SECRET_FILE)) {
@@ -815,7 +862,7 @@ function resolveVerifiedPlayerActor(params: {
   return null;
 }
 
-const REMINDERS_FILE = path.resolve(__dirname, '.data', 'reminders.json');
+const REMINDERS_FILE = path.resolve(SERVER_DATA_DIR, 'reminders.json');
 
 interface PlayerReminderRecord {
   playerId: string;
@@ -1113,8 +1160,8 @@ async function resolveRawDepositAddress(): Promise<string> {
   return '';
 }
 
-const CHANNELS_CONFIG_FILE = path.resolve(__dirname, '.data', 'channels_config.json');
-const ECONOMY_CONFIG_FILE = path.resolve(__dirname, '.data', 'economy_config.json');
+const CHANNELS_CONFIG_FILE = path.resolve(SERVER_DATA_DIR, 'channels_config.json');
+const ECONOMY_CONFIG_FILE = path.resolve(SERVER_DATA_DIR, 'economy_config.json');
 
 function normalizeChannelsConfigPayload(
   raw?: (Omit<Partial<ChannelsConfig>, 'channels'> & { channels?: Array<Partial<RequiredTelegramChannel>> }) | null,
@@ -1334,7 +1381,7 @@ async function loadExtraAdminIdsFromFirestore(): Promise<string[]> {
   }
 }
 
-const MAINTENANCE_CONFIG_FILE = path.resolve(__dirname, '.data', 'maintenance_config.json');
+const MAINTENANCE_CONFIG_FILE = path.resolve(SERVER_DATA_DIR, 'maintenance_config.json');
 
 function loadMaintenanceConfigFromDisk(): MaintenanceConfig | null {
   try {
@@ -1554,7 +1601,7 @@ async function saveMaintenanceConfigOnServer(
   return resolved;
 }
 
-const CHANNEL_CHECK_LOGS_FILE = path.resolve(__dirname, '.data', 'channel_check_logs.json');
+const CHANNEL_CHECK_LOGS_FILE = path.resolve(SERVER_DATA_DIR, 'channel_check_logs.json');
 const channelCheckLogs: ChannelCheckDiagnosticLog[] = [];
 
 function loadChannelCheckLogsFromDisk(): void {
@@ -3100,10 +3147,10 @@ function resolveTelegramUserFromRequest(
   };
 }
 
-const BOT_SUBSCRIBERS_FILE = path.resolve(__dirname, '.data', 'bot_subscribers.json');
-const TELEGRAM_OFFSET_FILE = path.resolve(__dirname, '.data', 'telegram_update_offset.txt');
-const PAYOUT_TEMPLATE_FILE = path.resolve(__dirname, '.data', 'payout_template.json');
-const PENDING_REFERRALS_FILE = path.resolve(__dirname, '.data', 'pending_referrals.json');
+const BOT_SUBSCRIBERS_FILE = path.resolve(SERVER_DATA_DIR, 'bot_subscribers.json');
+const TELEGRAM_OFFSET_FILE = path.resolve(SERVER_DATA_DIR, 'telegram_update_offset.txt');
+const PAYOUT_TEMPLATE_FILE = path.resolve(SERVER_DATA_DIR, 'payout_template.json');
+const PENDING_REFERRALS_FILE = path.resolve(SERVER_DATA_DIR, 'pending_referrals.json');
 
 export interface PendingReferralRecord {
   chatId: string;
@@ -4108,10 +4155,18 @@ function ensureBotPollerRunning(): void {
   void runLongPollCycle();
 }
 
-async function startServer() {
+export async function createApiApp(): Promise<express.Express> {
   const app = express();
   app.disable('x-powered-by');
   app.set('trust proxy', 1);
+
+  // Normalize Netlify Functions rewrite prefix (/.netlify/functions/api/* -> /api/*)
+  app.use((req, _res, next) => {
+    if (req.url.startsWith('/.netlify/functions/api')) {
+      req.url = req.url.replace(/^\/\.netlify\/functions\/api(?=\/|\?|$)/, '/api');
+    }
+    next();
+  });
 
   const expandCloudRunOrigins = (rawUrl: string): string[] => {
     const out: string[] = [];
@@ -4170,6 +4225,11 @@ async function startServer() {
     return Array.from(prefixes);
   })();
 
+  const extraCorsOrigins = String(process.env.CORS_ALLOWED_ORIGINS || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+
   const isAllowedCorsOrigin = (originHeader: string, req: express.Request): boolean => {
     try {
       const originUrl = new URL(originHeader);
@@ -4218,7 +4278,10 @@ async function startServer() {
         process.env.SHARED_APP_URL || '',
         process.env.WEBAPP_URL || '',
         process.env.VITE_WEBAPP_URL || '',
+        process.env.URL || '',
+        process.env.DEPLOY_PRIME_URL || '',
         cachedBotMenuWebAppUrl,
+        ...extraCorsOrigins,
       ];
       for (const raw of configuredWebUrls) {
         if (!raw) continue;
@@ -4242,7 +4305,11 @@ async function startServer() {
           res.sendStatus(403);
           return;
         }
-        res.status(403).json({ ok: false, error: 'Cross-origin request denied.' });
+        res.status(403).json({
+          ok: false,
+          error:
+            'Cross-origin request denied. Add your frontend origin to WEBAPP_URL or CORS_ALLOWED_ORIGINS on the backend.',
+        });
         return;
       }
       res.setHeader('Access-Control-Allow-Origin', origin);
@@ -5778,8 +5845,8 @@ async function startServer() {
     let projectId = '';
     let databaseId = '';
     try {
-      const cfgPath = path.resolve(__dirname, 'firebase-applet-config.json');
-      if (fs.existsSync(cfgPath)) {
+      const cfgPath = resolveFirebaseConfigPath();
+      if (cfgPath) {
         const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) as {
           projectId?: string;
           firestoreDatabaseId?: string;
@@ -8479,6 +8546,25 @@ async function startServer() {
     }
   });
 
+  app.get('/api/health', (_req, res) => {
+    res.json({
+      ok: true,
+      status: 'ok',
+      runtime: IS_SERVERLESS ? 'serverless' : 'node',
+      timeMs: Date.now(),
+    });
+  });
+
+  app.all('/api/*', (_req, res) => {
+    res.status(404).json({ ok: false, error: 'API route not found' });
+  });
+
+  return app;
+}
+
+export async function startServer() {
+  const app = await createApiApp();
+
   const reminderInterval = setInterval(() => {
     void processDueReminders();
   }, 30_000);
@@ -8490,15 +8576,7 @@ async function startServer() {
     ensureBotPollerRunning();
   }
 
-  app.get('/api/health', (_req, res) => {
-    res.json({ ok: true, status: 'ok', timeMs: Date.now() });
-  });
-
-  app.all('/api/*', (_req, res) => {
-    res.status(404).json({ ok: false, error: 'API route not found' });
-  });
-
-  const distDir = path.resolve(__dirname, 'dist');
+  const distDir = path.resolve(currentDir, 'dist');
   const distIndexExists = fs.existsSync(path.join(distDir, 'index.html'));
   const runningUnderTsx = process.execArgv.some((arg) => arg.includes('tsx'));
   const useProductionStatic =
@@ -8506,7 +8584,8 @@ async function startServer() {
 
   if (!useProductionStatic) {
     const httpServer = http.createServer(app);
-    const { createServer: createViteServer } = await import('vite');
+    const vitePkg = 'vite';
+    const { createServer: createViteServer } = (await import(vitePkg)) as typeof import('vite');
     const vite = await createViteServer({
       server: {
         middlewareMode: true,
@@ -8560,4 +8639,6 @@ async function startServer() {
   }
 }
 
-startServer();
+if (!IS_SERVERLESS && !process.env.ALPHAGRAM_DISABLE_AUTOSTART) {
+  void startServer();
+}

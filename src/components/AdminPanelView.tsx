@@ -999,6 +999,13 @@ export function AdminPanelView({
       const result = await probeVerificationServerConnection();
       setServerProbe(result);
       setApiBaseDiag(getApiBaseUrlDiagnostics());
+      if (result.reachable) {
+        setPasscodeError((prev) =>
+          prev && /unavailable|unable to reach|verification server|network error/i.test(prev)
+            ? null
+            : prev,
+        );
+      }
       if (result.reachable && options?.retestChannels) {
         if (onRetestChannelVerification) {
           void onRetestChannelVerification();
@@ -1914,16 +1921,37 @@ export function AdminPanelView({
   const handleSaveBackendUrlSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     onTabTap?.();
-    const saved = setConfiguredApiBaseUrl(backendUrlDraft);
+    const rawTrimmed = backendUrlDraft.trim();
+    const saved = setConfiguredApiBaseUrl(rawTrimmed);
+    if (rawTrimmed && !saved) {
+      setBackendUrlFeedback({
+        type: 'error',
+        text: 'Enter a valid https:// backend server URL (for example: https://your-bot-server.run.app).',
+      });
+      return;
+    }
     setBackendUrlDraft(saved);
+    setPasscodeError(null);
     setApiBaseDiag(getApiBaseUrlDiagnostics());
     setBackendUrlFeedback({
       type: 'ok',
       text: saved
-        ? `Backend API URL set to ${saved}. Re-testing endpoints...`
-        : 'Backend API URL reset to current site origin.',
+        ? `Backend API URL set to ${saved}. Testing connection...`
+        : 'Backend API URL reset to current site origin. Testing connection...',
     });
-    void runVerificationServerProbe({ retestChannels: true });
+    void runVerificationServerProbe({ retestChannels: true }).then((result) => {
+      if (result?.reachable) {
+        setBackendUrlFeedback({
+          type: 'ok',
+          text: `Connected to ${saved || 'current site origin'} (${result.latencyMs ?? 0}ms). You can unlock with your Admin Passcode above.`,
+        });
+      } else if (result?.error) {
+        setBackendUrlFeedback({
+          type: 'error',
+          text: result.error,
+        });
+      }
+    });
     if (onFetchSystemDiagnostics) {
       void onFetchSystemDiagnostics(true);
     }
@@ -2318,6 +2346,77 @@ export function AdminPanelView({
           {reportedError}
         </div>
 
+        {context === 'lock' && (
+          <form
+            onSubmit={handleSaveBackendUrlSubmit}
+            className="clay-inset !rounded-xl p-3 space-y-2"
+          >
+            <label
+              htmlFor="admin-lock-backend-api-url"
+              className="text-[11px] font-extrabold text-stone-800 dark:text-stone-200 flex items-center gap-1.5"
+            >
+              <Server className="w-3.5 h-3.5 text-amber-500 shrink-0" />
+              <span>Backend Server URL Override</span>
+            </label>
+            <div className="flex flex-col sm:flex-row gap-2">
+              <input
+                id="admin-lock-backend-api-url"
+                type="url"
+                value={backendUrlDraft}
+                onChange={(e) => {
+                  setBackendUrlDraft(e.target.value);
+                  setBackendUrlFeedback(null);
+                }}
+                placeholder="https://your-bot-server.run.app (blank = same-origin)"
+                className="clay-inset flex-1 min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400"
+              />
+              <button
+                type="submit"
+                disabled={probingServer}
+                className="clay-btn clay-btn-sky min-h-[38px] px-3.5 rounded-xl text-xs font-extrabold shrink-0 disabled:opacity-55"
+              >
+                Save &amp; Test
+              </button>
+            </div>
+            {backendUrlFeedback && (
+              <div
+                className={`text-[11px] font-bold break-words ${
+                  backendUrlFeedback.type === 'error'
+                    ? 'text-rose-700 dark:text-rose-300'
+                    : 'text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
+                {backendUrlFeedback.text}
+              </div>
+            )}
+          </form>
+        )}
+
+        <div className="flex items-center gap-2 flex-wrap">
+          <button
+            type="button"
+            disabled={probingServer}
+            onClick={() => {
+              onTabTap?.();
+              void runVerificationServerProbe({ retestChannels: true });
+            }}
+            className="clay-btn clay-btn-sky min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-55"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${probingServer ? 'animate-spin' : ''}`} />
+            <span>{probingServer ? 'Testing Connection...' : 'Re-test Connection'}</span>
+          </button>
+          {context === 'panel' && tab !== 'channels' && (
+            <button
+              type="button"
+              onClick={() => navigateAdminTab('channels')}
+              className="clay-btn clay-btn-neutral min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5"
+            >
+              <Server className="w-3.5 h-3.5" />
+              <span>Configure Backend URL</span>
+            </button>
+          )}
+        </div>
+
         <div className="clay-inset !rounded-xl p-3 space-y-1.5 text-[11px] font-mono-num">
           <div className="flex items-center justify-between gap-2 flex-wrap">
             <span className="font-sans font-bold text-stone-500 dark:text-stone-400">
@@ -2399,87 +2498,22 @@ export function AdminPanelView({
           </div>
           <ol className="list-decimal list-inside space-y-1 text-[11px] text-stone-700 dark:text-stone-300 leading-snug">
             <li>
+              <span className="font-bold">Netlify / Serverless Hosting:</span>{' '}
+              Deploy with <code className="font-mono-num">netlify.toml</code> + <code className="font-mono-num">netlify/functions/api.ts</code> and set <code className="font-mono-num">ADMIN_PASSCODE</code> &amp; <code className="font-mono-num">TELEGRAM_BOT_TOKEN</code> in Netlify Environment Variables so <code className="font-mono-num">/api/*</code> returns JSON.
+            </li>
+            <li>
               <span className="font-bold">Check <code className="font-mono-num">VITE_API_BASE_URL</code>:</span>{' '}
-              Ensure it is either unset (for same-origin Express hosting) or set to your live HTTPS server root (e.g. <code className="font-mono-num">https://your-host.run.app</code>) with no trailing slash or <code className="font-mono-num">/api</code> suffix, then rebuild the frontend.
+              If hosting frontend and backend separately, set <code className="font-mono-num">VITE_API_BASE_URL</code> to your live Express HTTPS origin (e.g. <code className="font-mono-num">https://your-host.run.app</code>) and allow this site in <code className="font-mono-num">CORS_ALLOWED_ORIGINS</code> (or <code className="font-mono-num">WEBAPP_URL</code>), then rebuild.
             </li>
             <li>
-              <span className="font-bold">Verify Express API Routing:</span>{' '}
-              Confirm <code className="font-mono-num">/api/health</code> and <code className="font-mono-num">/api/telegram/check-channels</code> return <code className="font-mono-num">application/json</code> instead of an HTML SPA page.
-            </li>
-            <li>
-              <span className="font-bold">Check Preview Host &amp; Override:</span>{' '}
-              If opened on a static CDN or blocked <code className="font-mono-num">ais-dev-*</code> preview URL, open your Bot Mini App server URL or set the live backend URL in{' '}
-              <span className="font-bold">Backend Server URL</span>.
+              <span className="font-bold">Verify API JSON Routing:</span>{' '}
+              Confirm <code className="font-mono-num">/api/health</code> and <code className="font-mono-num">/api/telegram/check-channels</code> return <code className="font-mono-num">application/json</code> instead of an HTML 404/SPA page.
             </li>
             <li>
               <span className="font-bold">Verify Bot Token &amp; Outbound Network:</span>{' '}
-              Confirm <code className="font-mono-num">TELEGRAM_BOT_TOKEN</code> is configured on the server (or saved in Admin Panel) and outbound calls to <code className="font-mono-num">api.telegram.org</code> are allowed.
+              Confirm <code className="font-mono-num">TELEGRAM_BOT_TOKEN</code> is configured on the server (or saved in Admin Panel) and outbound calls to <code className="font-mono-num">api.telegram.org</code> succeed.
             </li>
           </ol>
-        </div>
-
-        {context === 'lock' && (
-          <form
-            onSubmit={handleSaveBackendUrlSubmit}
-            className="pt-1 space-y-1.5"
-          >
-            <label
-              htmlFor="admin-lock-backend-api-url"
-              className="text-[11px] font-extrabold text-stone-700 dark:text-stone-300 flex items-center gap-1.5"
-            >
-              <Server className="w-3.5 h-3.5 text-amber-500" />
-              <span>Backend Server URL Override</span>
-            </label>
-            <div className="flex flex-col sm:flex-row gap-2">
-              <input
-                id="admin-lock-backend-api-url"
-                type="url"
-                value={backendUrlDraft}
-                onChange={(e) => {
-                  setBackendUrlDraft(e.target.value);
-                  setBackendUrlFeedback(null);
-                }}
-                placeholder="https://your-bot-server.run.app (blank = same-origin)"
-                className="clay-inset flex-1 min-h-[38px] px-3 text-xs font-mono-num font-bold text-stone-900 dark:text-stone-100 placeholder:text-stone-400"
-              />
-              <button
-                type="submit"
-                className="clay-btn clay-btn-sky min-h-[38px] px-3 rounded-xl text-xs font-extrabold shrink-0"
-              >
-                Save &amp; Test
-              </button>
-            </div>
-            {backendUrlFeedback && (
-              <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
-                {backendUrlFeedback.text}
-              </div>
-            )}
-          </form>
-        )}
-
-        <div className="flex items-center gap-2 flex-wrap">
-          <button
-            type="button"
-            disabled={probingServer}
-            onClick={() => {
-              onTabTap?.();
-              void runVerificationServerProbe({ retestChannels: true });
-            }}
-            className="clay-btn clay-btn-sky min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5 disabled:opacity-55"
-          >
-            <RefreshCw className={`w-3.5 h-3.5 ${probingServer ? 'animate-spin' : ''}`} />
-            <span>{probingServer ? 'Testing Connection...' : 'Re-test Connection'}</span>
-          </button>
-          {context === 'panel' && tab !== 'channels' && (
-            <button
-              type="button"
-              onClick={() => navigateAdminTab('channels')}
-              className="clay-btn clay-btn-neutral min-h-[36px] px-3.5 rounded-xl text-xs font-extrabold inline-flex items-center gap-1.5"
-            >
-              <Server className="w-3.5 h-3.5" />
-              <span>Configure Backend URL</span>
-            </button>
-          )}
         </div>
       </section>
     );
@@ -2640,6 +2674,12 @@ export function AdminPanelView({
                 </button>
               </div>
             </div>
+
+            {!isVerificationServerUnreachable && backendUrlFeedback?.type === 'ok' && (
+              <div className="rounded-xl bg-emerald-50 dark:bg-emerald-950/50 border border-emerald-200 dark:border-emerald-800/70 px-3 py-2 text-xs font-bold text-emerald-700 dark:text-emerald-300 break-words">
+                {backendUrlFeedback.text}
+              </div>
+            )}
 
             {passcodeError && (
               <div
@@ -2858,7 +2898,13 @@ export function AdminPanelView({
               </button>
             </div>
             {backendUrlFeedback && (
-              <div className="text-[11px] font-bold text-emerald-700 dark:text-emerald-300">
+              <div
+                className={`text-[11px] font-bold break-words ${
+                  backendUrlFeedback.type === 'error'
+                    ? 'text-rose-700 dark:text-rose-300'
+                    : 'text-emerald-700 dark:text-emerald-300'
+                }`}
+              >
                 {backendUrlFeedback.text}
               </div>
             )}

@@ -7,9 +7,26 @@ export interface ReferralData {
   referredBy: { [userId: string]: string };
 }
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-const REFERRALS_STORAGE_FILE = path.resolve(__dirname, '..', '..', '.data', 'referrals.json');
+const currentDir = (() => {
+  try {
+    if (typeof import.meta?.url === 'string' && import.meta.url) {
+      return path.dirname(fileURLToPath(import.meta.url));
+    }
+  } catch {
+    // Fall back when bundled in CommonJS serverless contexts
+  }
+  return process.cwd();
+})();
+
+const IS_SERVERLESS =
+  process.env.NETLIFY === 'true' ||
+  Boolean(process.env.AWS_LAMBDA_FUNCTION_NAME) ||
+  Boolean(process.env.LAMBDA_TASK_ROOT) ||
+  Boolean(process.env.VERCEL);
+
+const REFERRALS_STORAGE_FILE = IS_SERVERLESS
+  ? path.resolve('/tmp', 'alphagram_data', 'referrals.json')
+  : path.resolve(currentDir, '..', '..', '.data', 'referrals.json');
 
 let storage: ReferralData = {
   referrals: {},

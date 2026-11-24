@@ -555,7 +555,14 @@ export function normalizeApiBaseUrl(raw?: string | null): string {
   const trimmed = String(raw || '').trim().replace(/\/+$/, '');
   if (!trimmed) return '';
   if (/^https?:\/\/[a-zA-Z0-9.-]+(:\d+)?(\/.*)?$/i.test(trimmed)) {
-    return trimmed;
+    try {
+      const parsed = new URL(trimmed);
+      let cleanPath = parsed.pathname.replace(/\/+$/, '');
+      cleanPath = cleanPath.replace(/\/api$/i, '').replace(/\/+$/, '');
+      return `${parsed.origin}${cleanPath}`;
+    } catch {
+      return trimmed.replace(/\/api$/i, '').replace(/\/+$/, '');
+    }
   }
   return '';
 }

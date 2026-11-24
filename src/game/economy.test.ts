@@ -196,6 +196,11 @@ import {
   saveReferral,
 } from '../server/referralStorage';
 import {
+  normalizeApiBaseUrl,
+  resolveApiCandidateUrls,
+  setConfiguredApiBaseUrl,
+} from '../utils/telegram';
+import {
   calculateMsUntilBasketFull,
   shouldTriggerBasketFullNotification,
 } from '../utils/notifications';
@@ -4362,4 +4367,57 @@ test('Fox / Crow Meadow Mini-Event grants Coins + XP after ad, enforces 15m cool
   assert.equal(decoded.critterChasedCount, 2);
 });
 
+test('normalizeApiBaseUrl strips trailing slashes and accidental /api suffixes while rejecting invalid URLs', () => {
+  assert.equal(normalizeApiBaseUrl('https://webapp2-0.netlify.app/'), 'https://webapp2-0.netlify.app');
+  assert.equal(normalizeApiBaseUrl('https://webapp2-0.netlify.app/api'), 'https://webapp2-0.netlify.app');
+  assert.equal(normalizeApiBaseUrl('https://webapp2-0.netlify.app/api/'), 'https://webapp2-0.netlify.app');
+  assert.equal(normalizeApiBaseUrl('https://host.run.app:8443/subpath/api/'), 'https://host.run.app:8443/subpath');
+  assert.equal(normalizeApiBaseUrl('http://localhost:3000/API/'), 'http://localhost:3000');
+  assert.equal(normalizeApiBaseUrl('ftp://invalid-scheme.com'), '');
+  assert.equal(normalizeApiBaseUrl('not-a-url'), '');
+  assert.equal(normalizeApiBaseUrl(''), '');
+});
 
+test('resolveApiCandidateUrls respects normalized localStorage override and falls back cleanly', () => {
+  const prevStorage = (globalThis as { localStorage?: Storage }).localStorage;
+  const store = new Map<string, string>();
+  (globalThis as { localStorage?: Storage }).localStorage = {
+    get length() {
+      return store.size;
+    },
+    clear() {
+      store.clear();
+    },
+    getItem(key: string) {
+      return store.get(key) ?? null;
+    },
+    key(index: number) {
+      return Array.from(store.keys())[index] ?? null;
+    },
+    removeItem(key: string) {
+      store.delete(key);
+    },
+    setItem(key: string, value: string) {
+      store.set(key, value);
+    },
+  };
+
+  try {
+    const saved = setConfiguredApiBaseUrl('https://ais-dev-demo-123.asia-east1.run.app/api/');
+    assert.equal(saved, 'https://ais-dev-demo-123.asia-east1.run.app');
+    const candidates = resolveApiCandidateUrls('/api/admin/auth');
+    assert.deepEqual(candidates, [
+      'https://ais-dev-demo-123.asia-east1.run.app/api/admin/auth',
+      'https://ais-pre-demo-123.asia-east1.run.app/api/admin/auth',
+    ]);
+
+    setConfiguredApiBaseUrl('');
+    assert.deepEqual(resolveApiCandidateUrls('api/health'), ['/api/health']);
+  } finally {
+    if (prevStorage === undefined) {
+      delete (globalThis as { localStorage?: Storage }).localStorage;
+    } else {
+      (globalThis as { localStorage?: Storage }).localStorage = prevStorage;
+    }
+  }
+});
