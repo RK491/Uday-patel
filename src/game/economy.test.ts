@@ -27,6 +27,7 @@ import {
   calculateProductionRate,
   calculateReferralBonusEggs,
   calculateReferralEggCommission,
+  calculateReinvestCoins,
   calculateTaskRefundAmount,
   canAddAdminPlayerId,
   canBanPlayerId,
@@ -72,6 +73,7 @@ import {
   FEED_BOOSTER_COST_COINS,
   FEED_BOOSTER_DURATION_MS,
   filterPlayersBySearchQuery,
+  getActiveReinvestSurgeStatus,
   getCoopFeverProgress,
   isAutoHarvestDroneActive,
   isChannelVerificationSatisfied,
@@ -83,6 +85,7 @@ import {
   renderWithdrawApproveMessage,
   resolveEconomyConfig,
   resolveMaintenanceConfig,
+  resolveReinvestSurge,
   USER_TASK_CHANNEL_CHECK_FEE_COINS,
   USER_TASK_MIN_REWARD_COINS,
   filterWithdrawalsByTab,
@@ -4130,3 +4133,76 @@ test('resolveLiveTaskChannelLinks falls back to requiredChannels payout and offi
   assert.equal(byId.get('daily_news')?.actionUrl, 'https://t.me/FreshOfficial');
   assert.equal(byId.get('daily_promos')?.actionUrl, 'https://t.me/FreshOfficial');
 });
+
+test('Reinvest Surge Windows resolve clamping, active/scheduled/expired status, and boosted reinvestEggs payouts', () => {
+  const clamped = resolveReinvestSurge({
+    enabled: true,
+    bonusPercent: 99,
+    startsAtMs: NOW + 60_000,
+    endsAtMs: NOW + 3_660_000,
+    label: '  Super Surge Window  ',
+  });
+  assert.ok(clamped);
+  assert.equal(clamped.bonusPercent, 50);
+  assert.equal(clamped.label, 'Super Surge Window');
+
+  const economyWithSurge = resolveEconomyConfig({
+    minWithdrawEggs: 100,
+    perReferRewardCoins: 150,
+    reinvestSurge: {
+      enabled: true,
+      bonusPercent: 25,
+      startsAtMs: NOW + 60_000,
+      endsAtMs: NOW + 3_660_000,
+      label: 'Weekend Surge',
+    },
+  });
+
+  // Before start -> scheduled, base 5% rate applies
+  const beforeStart = getActiveReinvestSurgeStatus(economyWithSurge, NOW);
+  assert.equal(beforeStart.isActive, false);
+  assert.equal(beforeStart.isScheduled, true);
+  assert.equal(beforeStart.bonusPercent, 5);
+  assert.equal(beforeStart.startsInMs, 60_000);
+
+  // During active window -> +25% bonus applies
+  const during = getActiveReinvestSurgeStatus(economyWithSurge, NOW + 120_000);
+  assert.equal(during.isActive, true);
+  assert.equal(during.isScheduled, false);
+  assert.equal(during.bonusPercent, 25);
+  assert.equal(during.extraBoostPercent, 20);
+  assert.equal(during.remainingMs, 3_540_000);
+
+  // After end -> expired, reverts to +5%
+  const afterEnd = getActiveReinvestSurgeStatus(economyWithSurge, NOW + 3_660_000);
+  assert.equal(afterEnd.isActive, false);
+  assert.equal(afterEnd.isScheduled, false);
+  assert.equal(afterEnd.bonusPercent, 5);
+
+  // Calculation & clamping (0.07 coins per effective egg)
+  const calcSurge = calculateReinvestCoins(1000, during.bonusRate);
+  assert.equal(calcSurge.bonusPercent, 25);
+  assert.equal(calcSurge.bonusEggs, 250);
+  assert.equal(calcSurge.baseCoins, 70);
+  assert.equal(calcSurge.bonusCoins, 18);
+  assert.equal(calcSurge.totalCoins, 88);
+
+  const calcMaxClamp = calculateReinvestCoins(1000, 0.99);
+  assert.equal(calcMaxClamp.bonusPercent, 50);
+
+  // reinvestEggs applies active surge rate and falls back after expiration
+  const { profile } = createDefaultProfile('player_surge1', 'SurgeUser', '@surge', NOW);
+  const surgeExec = reinvestEggs({ ...profile, eggs: 2000 }, 1000, NOW + 120_000, economyWithSurge);
+  assert.ok(!('error' in surgeExec));
+  assert.equal(surgeExec.isSurgeApplied, true);
+  assert.equal(surgeExec.bonusPercent, 25);
+  assert.equal(surgeExec.coinsReceived, calcSurge.totalCoins);
+  assert.match(surgeExec.transaction.title, /\+25% Surge Bonus/);
+
+  const postSurgeExec = reinvestEggs({ ...profile, eggs: 2000 }, 1000, NOW + 4_000_000, economyWithSurge);
+  assert.ok(!('error' in postSurgeExec));
+  assert.equal(postSurgeExec.isSurgeApplied, false);
+  assert.equal(postSurgeExec.bonusPercent, 5);
+  assert.match(postSurgeExec.transaction.title, /\+5% extra/);
+});
+

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { EggIcon } from './GameIcons';
-import clayEggBasketHero from '../assets/images/clay_egg_basket_1794678826026.jpg';
+import animeEggBasketHero from '../assets/images/anime_egg_basket_1795509840638.jpg';
 
 interface WelcomeBackModalProps {
   pendingEggs: number;
@@ -38,11 +38,11 @@ export function WelcomeBackModal({
         </p>
 
         <div className="my-5 flex items-center justify-center">
-          <div className="animate-clay-float clay-card-warm relative w-40 h-40 !rounded-full p-2 flex items-center justify-center overflow-hidden">
+          <div className="animate-clay-float clay-card-warm relative w-40 h-40 !rounded-full p-1.5 flex items-center justify-center overflow-hidden">
             {!imgFailed ? (
               <img
-                src={clayEggBasketHero}
-                alt="Hand-sculpted clay basket full of pastel farm fresh eggs"
+                src={animeEggBasketHero}
+                alt="Hand-painted anime wicker basket overflowing with golden and cream farm eggs"
                 referrerPolicy="no-referrer"
                 onError={() => setImgFailed(true)}
                 className="w-full h-full object-cover rounded-full"

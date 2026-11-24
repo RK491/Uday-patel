@@ -25,10 +25,11 @@ import {
   type DailyEarningsChartPoint,
   eggsToUsd,
   filterWithdrawalsByTab,
+  getActiveReinvestSurgeStatus,
   MIN_REINVEST_EGGS,
   type WithdrawalFilterTab,
 } from '../game/economy';
-import type { TransactionEntry, UserFarmProfile, WithdrawalOrder } from '../types/farm';
+import type { EconomyConfig, TransactionEntry, UserFarmProfile, WithdrawalOrder } from '../types/farm';
 import { CoinIcon, EggIcon } from './GameIcons';
 
 function EarningsChartTooltip({
@@ -61,11 +62,21 @@ interface WalletViewProps {
   profile: UserFarmProfile;
   transactions: TransactionEntry[];
   withdrawals?: WithdrawalOrder[];
+  economyConfig?: Partial<EconomyConfig> | null;
+  nowMs?: number;
   onTabTap?: () => void;
   onOpenDeposit: () => void;
   onOpenWithdraw: () => void;
   onOpenReinvest?: () => void;
   onReinvest: (eggsAmount: number) => void;
+}
+
+function formatSurgeCountdown(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
 }
 
 function formatDayGroup(ms: number, nowMs: number): string {
@@ -81,6 +92,8 @@ export function WalletView({
   profile,
   transactions,
   withdrawals = [],
+  economyConfig,
+  nowMs: propNowMs,
   onTabTap,
   onOpenDeposit,
   onOpenWithdraw,
@@ -92,7 +105,8 @@ export function WalletView({
   const [showReinvestModal, setShowReinvestModal] = useState(false);
   const [reinvestInput, setReinvestInput] = useState(String(Math.min(profile.eggs, 500)));
 
-  const nowMs = Date.now();
+  const nowMs = propNowMs ?? Date.now();
+  const surgeStatus = getActiveReinvestSurgeStatus(economyConfig, nowMs);
   const usdBalance = eggsToUsd(profile.eggs);
   const pendingWithdrawals = filterWithdrawalsByTab(withdrawals, 'pending');
   const completedWithdrawals = filterWithdrawalsByTab(withdrawals, 'completed');
@@ -125,7 +139,7 @@ export function WalletView({
   }, []);
 
   const numericReinvest = Math.max(0, Math.floor(Number(reinvestInput) || 0));
-  const preview = calculateReinvestCoins(numericReinvest);
+  const preview = calculateReinvestCoins(numericReinvest, surgeStatus.bonusRate);
 
   return (
     <div className="animate-clay-enter space-y-4">
@@ -208,21 +222,38 @@ export function WalletView({
             setShowReinvestModal(true);
           }
         }}
-        className="clay-btn clay-card-mint w-full p-4 flex items-center justify-between gap-3 text-left"
+        className={`clay-btn w-full p-4 flex items-center justify-between gap-3 text-left ${
+          surgeStatus.isActive ? 'clay-card-warm border border-amber-300/80 dark:border-amber-700/60' : 'clay-card-mint'
+        }`}
       >
         <div className="flex items-center gap-3 min-w-0">
           <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
             <RefreshCw className="w-5 h-5" />
           </div>
           <div className="min-w-0">
-            <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">Reinvest eggs</div>
+            <div className="flex items-center gap-1.5 flex-wrap">
+              <span className="text-sm font-extrabold text-stone-900 dark:text-stone-100">
+                {surgeStatus.isActive ? `${surgeStatus.label}` : 'Reinvest eggs'}
+              </span>
+              {surgeStatus.isActive && (
+                <span className="font-mono-num tabular-nums text-[10px] font-extrabold text-amber-900 dark:text-amber-200 bg-amber-200/75 dark:bg-amber-900/60 px-1.5 py-0.5 rounded-md">
+                  {formatSurgeCountdown(surgeStatus.remainingMs)}
+                </span>
+              )}
+            </div>
             <div className="text-xs text-stone-600 dark:text-stone-300 truncate">
-              Turn your eggs into coins and get +5% extra (min. {MIN_REINVEST_EGGS})
+              {surgeStatus.isActive
+                ? `Surge active! Convert eggs to coins (+5% base + ${surgeStatus.extraBoostPercent}% surge)`
+                : `Turn your eggs into coins and get +5% extra (min. ${MIN_REINVEST_EGGS})`}
             </div>
           </div>
         </div>
-        <span className="clay-btn-emerald px-3 py-1 rounded-xl text-xs font-extrabold shrink-0">
-          +5%
+        <span
+          className={`px-3 py-1 rounded-xl text-xs font-extrabold font-mono-num shrink-0 ${
+            surgeStatus.isActive ? 'clay-btn-amber' : 'clay-btn-emerald'
+          }`}
+        >
+          +{surgeStatus.bonusPercent}%
         </span>
       </button>
 
@@ -538,7 +569,7 @@ export function WalletView({
           <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 id="reinvest-modal-title" className="text-lg font-extrabold text-stone-900 dark:text-stone-100">
-                Reinvest Eggs (+5%)
+                Reinvest Eggs (+{surgeStatus.bonusPercent}%{surgeStatus.isActive ? ' Surge' : ''})
               </h3>
               <button
                 type="button"
@@ -586,7 +617,7 @@ export function WalletView({
                 <span className="font-mono-num font-bold">+{preview.baseCoins.toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
-                <span>+5% Reinvest bonus</span>
+                <span>+{surgeStatus.bonusPercent}% {surgeStatus.isActive ? 'Surge bonus' : 'Reinvest bonus'}</span>
                 <span className="font-mono-num font-bold">+{preview.bonusCoins.toLocaleString()}</span>
               </div>
               <div className="flex justify-between text-sm font-extrabold text-emerald-950 dark:text-emerald-100 pt-1 border-t border-emerald-200 dark:border-emerald-800/60">

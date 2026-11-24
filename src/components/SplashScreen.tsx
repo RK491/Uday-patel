@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion } from 'motion/react';
-import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
+import animeHenMascot from '../assets/images/anime_hen_mascot_1795509839642.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface SplashScreenProps {
@@ -47,7 +47,7 @@ export function SplashScreen({
           onComplete();
         }
       }}
-      className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-gradient-to-b from-[#F7F6F2] via-[#FAF8F2] to-[#FEF3C7] dark:from-[#0F1115] dark:via-[#14171D] dark:to-[#1C1914] px-6 select-none ${
+      className={`fixed inset-0 z-50 flex flex-col items-center justify-center bg-gradient-to-b from-[#FFFBF0] via-[#FFF4E0] to-[#FCE7F3] dark:from-[#121526] dark:via-[#191E36] dark:to-[#241B2E] px-6 select-none ${
         isFadingOut ? 'animate-splash-fade-out pointer-events-none' : ''
       }`}
     >
@@ -58,14 +58,14 @@ export function SplashScreen({
         className="clay-card p-7 flex flex-col items-center text-center max-w-xs w-full space-y-5"
       >
         <div className="relative flex items-center justify-center animate-clay-float">
-          <div className="w-32 h-32 rounded-[2.2rem] clay-card-warm p-2 flex items-center justify-center overflow-hidden">
+          <div className="w-32 h-32 rounded-[1.8rem] clay-card-warm p-1.5 flex items-center justify-center overflow-hidden">
             {!imgFailed ? (
               <img
-                src={clayHenMascot}
-                alt="Sculpted clay Alpha Gram hen mascot with golden coin and egg"
+                src={animeHenMascot}
+                alt="Anime cel-shaded Alpha Gram hen mascot holding a golden coin beside a pastel egg"
                 referrerPolicy="no-referrer"
                 onError={() => setImgFailed(true)}
-                className="w-full h-full object-cover rounded-[1.7rem]"
+                className="w-full h-full object-cover rounded-[1.35rem]"
               />
             ) : (
               <ChickenSprite breed="leghorn" className="w-20 h-20 animate-chicken-bob" />

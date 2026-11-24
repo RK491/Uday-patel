@@ -230,6 +230,7 @@
         "eggs": { "type": "number" },
         "totalEggsCollected": { "type": "number" },
         "chickensCount": { "type": "number" },
+        "badges": { "type": "array" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },
       "required": ["uid", "displayName", "handle", "photoUrl", "avatarColor", "referralCode", "buyerPoints", "inviterCount", "eggs", "totalEggsCollected", "chickensCount", "updatedAt"]
@@ -392,11 +393,12 @@
     },
     "EconomyConfig": {
       "title": "EconomyConfig",
-      "description": "Admin-editable minimum withdrawal eggs and per-referral reward coins synced across backend and clients.",
+      "description": "Admin-editable minimum withdrawal eggs, per-referral reward coins, and Reinvest Surge Window settings synced across backend and clients.",
       "type": "object",
       "properties": {
         "minWithdrawEggs": { "type": "number" },
         "perReferRewardCoins": { "type": "number" },
+        "reinvestSurge": { "type": "object" },
         "updatedAtMs": { "type": "number" },
         "updatedAt": { "type": "string", "format": "date-time" }
       },

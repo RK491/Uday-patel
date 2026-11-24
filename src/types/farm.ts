@@ -174,6 +174,28 @@ export interface ReferralRecord {
   createdAtMs: number;
 }
 
+export type AchievementTier = 'bronze' | 'silver' | 'gold' | 'legend';
+
+export type AchievementIconKey =
+  | 'egg'
+  | 'crown'
+  | 'flame'
+  | 'basket'
+  | 'users'
+  | 'trophy'
+  | 'send'
+  | 'sparkles';
+
+export interface ShowcaseBadge {
+  id: string;
+  title: string;
+  badgeLabel: string;
+  description: string;
+  tier: AchievementTier;
+  icon: AchievementIconKey;
+  perkLabel: string;
+}
+
 export interface LeaderboardEntry {
   uid: string;
   displayName: string;
@@ -186,6 +208,7 @@ export interface LeaderboardEntry {
   eggs: number;
   totalEggsCollected: number;
   chickensCount: number;
+  badges?: string[];
   isCurrentUser?: boolean;
 }
 
@@ -458,8 +481,17 @@ export interface MaintenanceConfig {
   updatedAtMs: number;
 }
 
+export interface ReinvestSurgeConfig {
+  enabled: boolean;
+  bonusPercent: number;
+  startsAtMs: number;
+  endsAtMs: number;
+  label?: string;
+}
+
 export interface EconomyConfig {
   minWithdrawEggs: number;
   perReferRewardCoins: number;
+  reinvestSurge?: ReinvestSurgeConfig;
   updatedAtMs: number;
 }

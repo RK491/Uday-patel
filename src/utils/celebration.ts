@@ -50,12 +50,22 @@ export function triggerTop10RankConfetti(): void {
 
 export function triggerCollectConfetti(): void {
   safeFire({
-    particleCount: 36,
-    spread: 58,
-    startVelocity: 26,
+    particleCount: 34,
+    angle: 78,
+    spread: 56,
+    startVelocity: 30,
     scalar: 0.85,
-    origin: { y: 0.72 },
+    origin: { x: 0.68, y: 0.78 },
     colors: ['#F59E0B', '#FDE047', '#FFFBEB', '#10B981'],
+  });
+  safeFire({
+    particleCount: 22,
+    angle: 112,
+    spread: 48,
+    startVelocity: 24,
+    scalar: 0.78,
+    origin: { x: 0.45, y: 0.72 },
+    colors: ['#FBBF24', '#FEF3C7', '#34D399', '#FFFFFF'],
   });
 }
 

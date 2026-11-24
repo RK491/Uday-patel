@@ -18,7 +18,9 @@ function createFirestoreInstance(): Firestore {
   const isBrowser = typeof window !== 'undefined';
   const transportSettings = isBrowser
     ? {
-        experimentalAutoDetectLongPolling: true,
+        experimentalForceLongPolling: true,
+        experimentalLongPollingOptions: { timeoutSeconds: 15 },
+        useFetchStreams: false,
       }
     : {};
 
@@ -51,6 +53,20 @@ function createFirestoreInstance(): Firestore {
 
 export const db = createFirestoreInstance();
 
+if (typeof window !== 'undefined') {
+  const recoverNetwork = () => {
+    void enableNetwork(db).catch(() => {});
+  };
+  window.addEventListener('online', recoverNetwork);
+  if (typeof document !== 'undefined') {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        recoverNetwork();
+      }
+    });
+  }
+}
+
 export enum OperationType {
   CREATE = 'create',
   UPDATE = 'update',
@@ -80,6 +96,33 @@ export function handleFirestoreError(
   throw new Error(JSON.stringify(errInfo));
 }
 
+async function probeFirestoreRestEndpoint(): Promise<boolean> {
+  if (typeof fetch === 'undefined') return false;
+  const projectId = firebaseConfig.projectId;
+  const databaseId = firebaseConfig.firestoreDatabaseId || '(default)';
+  const apiKey = firebaseConfig.apiKey;
+  if (!projectId || !apiKey) return false;
+  const controller = typeof AbortController !== 'undefined' ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), 5000) : null;
+  try {
+    const url = `https://firestore.googleapis.com/v1/projects/${encodeURIComponent(
+      projectId,
+    )}/databases/${encodeURIComponent(databaseId)}/documents/app_config/season?key=${encodeURIComponent(
+      apiKey,
+    )}`;
+    const response = await fetch(url, {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller?.signal,
+    });
+    return response.status >= 200 && response.status < 500;
+  } catch {
+    return false;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function testFirestoreConnection(): Promise<boolean> {
   const probeRef = doc(db, 'app_config', 'season');
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -93,13 +136,19 @@ export async function testFirestoreConnection(): Promise<boolean> {
       const msg = error instanceof Error ? error.message : String(error);
       const isOfflineErr =
         msg.includes('the client is offline') ||
-        msg.includes('Could not reach Cloud Firestore backend');
+        msg.includes('Could not reach Cloud Firestore backend') ||
+        msg.includes('unavailable');
       if (!isOfflineErr) {
         return true;
       }
       if (attempt === 0) {
         await new Promise((resolve) => setTimeout(resolve, 1200));
         continue;
+      }
+      const restReachable = await probeFirestoreRestEndpoint();
+      if (restReachable) {
+        await enableNetwork(db).catch(() => {});
+        return true;
       }
       console.error('Please check your Firebase configuration.');
       return false;

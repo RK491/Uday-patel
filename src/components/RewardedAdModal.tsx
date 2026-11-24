@@ -10,7 +10,7 @@ import {
   sanitizeExternalUrl,
 } from '../game/economy';
 import type { AdConfig, ChickenBreedId } from '../types/farm';
-import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
+import animeHenMascot from '../assets/images/anime_hen_mascot_1795509839642.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 export type ModalAdActionKind =
@@ -40,6 +40,7 @@ interface RewardedAdModalProps {
   coopFeverAdsRequired?: number | null;
   reinvestEggs?: number | null;
   reinvestCoins?: number | null;
+  reinvestBonusPercent?: number | null;
   fallbackNotice?: string | null;
   mandatory?: boolean;
   onComplete: () => void;
@@ -62,6 +63,7 @@ export function RewardedAdModal({
   coopFeverAdsRequired,
   reinvestEggs,
   reinvestCoins,
+  reinvestBonusPercent,
   fallbackNotice,
   mandatory = false,
   onComplete,
@@ -97,6 +99,11 @@ export function RewardedAdModal({
   const feverNext = Math.min(feverReq, feverCurrent + 1);
   const safeReinvestEggs = Math.max(0, Math.floor(Number(reinvestEggs ?? 0)));
   const safeReinvestCoins = Math.max(0, Math.floor(Number(reinvestCoins ?? 0)));
+  const safeReinvestBonusPercent = Math.max(
+    5,
+    Math.min(50, Math.round(Number(reinvestBonusPercent ?? 5) || 5)),
+  );
+  const reinvestBonusTag = safeReinvestBonusPercent > 5 ? 'Surge Bonus' : 'Extra';
   const isMilestoneEggAd = watchedCount + 1 >= 10;
   const watchAdEggAmount = isMilestoneEggAd
     ? FREE_EGGS_PER_AD + FREE_EGGS_MILESTONE_BONUS
@@ -115,7 +122,7 @@ export function RewardedAdModal({
     if (actionKind === 'buy_chicken') return 'Miner Purchase Ad';
     if (actionKind === 'adsgram_task') return 'AdsGram Bot Joins';
     if (actionKind === 'coop_fever') return `3× Coop Fever (${feverNext}/${feverReq})`;
-    if (actionKind === 'reinvest') return 'Reinvest Ad (+5% Extra)';
+    if (actionKind === 'reinvest') return `Reinvest Ad (+${safeReinvestBonusPercent}% ${reinvestBonusTag})`;
     if (networkLabel) return `${networkLabel} · Earn Coins`;
     return `Get Free Eggs (${watchedCount + 1}/10)`;
   })();
@@ -160,7 +167,9 @@ export function RewardedAdModal({
         : `Dedicated 3× Fever Ad (${feverNext}/${feverReq}). Complete ${feverReq} Farm Fever ads to earn 3× egg production for 10 minutes.`;
     }
     if (actionKind === 'reinvest') {
-      return `Complete this ad to reinvest ${safeReinvestEggs.toLocaleString()} eggs (+5% extra) into +${safeReinvestCoins.toLocaleString()} coins. Does not count toward the 30-ad Withdraw criteria.`;
+      return `Complete this ad to reinvest ${safeReinvestEggs.toLocaleString()} eggs (+${safeReinvestBonusPercent}% ${
+        safeReinvestBonusPercent > 5 ? 'Surge Bonus' : 'extra'
+      }) into +${safeReinvestCoins.toLocaleString()} coins. Does not count toward the 30-ad Withdraw criteria.`;
     }
     if (hasCoinReward) {
       return `Watch until the timer ends to earn +${rewardCoins} coins directly to your wallet.`;
@@ -227,8 +236,8 @@ export function RewardedAdModal({
                 <Flame className="w-11 h-11 text-orange-500 fill-orange-400" />
               ) : !imgFailed ? (
                 <img
-                  src={clayHenMascot}
-                  alt="Clay Alpha Gram mascot"
+                  src={animeHenMascot}
+                  alt="Anime Alpha Gram hen mascot"
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
                   className="w-full h-full object-cover rounded-xl"
@@ -271,7 +280,9 @@ export function RewardedAdModal({
           {actionKind === 'reinvest' && safeReinvestCoins > 0 && (
             <div className="inline-flex items-center gap-1.5 rounded-xl bg-emerald-100/80 dark:bg-emerald-950/60 border border-emerald-300/70 dark:border-emerald-700/50 px-3 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
               <CoinIcon className="w-4 h-4" />
-              <span className="font-mono-num">+{safeReinvestCoins.toLocaleString()} Coins (+5% Extra Eggs)</span>
+              <span className="font-mono-num">
+                +{safeReinvestCoins.toLocaleString()} Coins (+{safeReinvestBonusPercent}% {reinvestBonusTag})
+              </span>
             </div>
           )}
 

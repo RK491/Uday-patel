@@ -43,6 +43,7 @@ import {
   DEFAULT_GET_CODE_CHANNEL_URL,
   FREE_EGGS_MILESTONE_BONUS,
   FREE_EGGS_PER_AD,
+  getActiveReinvestSurgeStatus,
   getAdNetworkClaimCountToday,
   getBotJoinClaimCountToday,
   getTaskChannelCheckMode,
@@ -63,6 +64,7 @@ import type {
   AdConfig,
   AdNetworkId,
   ChannelVerificationResult,
+  EconomyConfig,
   RequiredTelegramChannel,
   TaskCategory,
   TaskDefinition,
@@ -91,6 +93,8 @@ interface TasksViewProps {
   getCodeChannelUrl?: string;
   botUsername?: string | null;
   taskPricingConfig?: TaskPricingConfig;
+  economyConfig?: Partial<EconomyConfig> | null;
+  nowMs?: number;
   watchingAd?: boolean;
   activeAdNetwork?: AdNetworkId | null;
   activeAdAction?: 'watch_ad' | 'ad_network' | 'adsgram_task' | null;
@@ -147,6 +151,8 @@ export function TasksView({
   getCodeChannelUrl,
   botUsername,
   taskPricingConfig,
+  economyConfig,
+  nowMs,
   watchingAd = false,
   activeAdNetwork = null,
   activeAdAction = null,
@@ -860,11 +866,24 @@ export function TasksView({
     const liveChannelHandle = hasChannelCheck
       ? normalizeTelegramChannelHandle(task.actionUrl || '').handle
       : '';
+    const surgeStatus =
+      task.id === 'daily_reinvest'
+        ? getActiveReinvestSurgeStatus(economyConfig, nowMs ?? Date.now())
+        : null;
+    const formatTaskSurgeCountdown = (ms: number) => {
+      const totalSec = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    };
     const resolvedSubtitle =
       task.id === 'daily_reinvest' && !done
         ? profile.lastReinvestDate === todayStr
           ? 'Reinvest confirmed today — tap Claim for +100 coins!'
-          : 'Reinvest min. 500 eggs (+5% extra) to unlock this reward'
+          : surgeStatus?.isActive
+            ? `${surgeStatus.label}: +${surgeStatus.bonusPercent}% bonus (${formatTaskSurgeCountdown(surgeStatus.remainingMs)} left)`
+            : 'Reinvest min. 500 eggs (+5% extra) to unlock this reward'
         : task.subtitle ||
           (liveChannelHandle ? `Live membership check · ${liveChannelHandle}` : undefined);
     const spotsLeftLabel = `${remainingSlots?.toLocaleString() ?? 0}/${totalSlots.toLocaleString()} spots left`;
@@ -898,6 +917,11 @@ export function TasksView({
                 {hasChannelCheck && (
                   <span className="rounded-md bg-sky-100/80 dark:bg-sky-950/60 border border-sky-300/70 dark:border-sky-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-sky-800 dark:text-sky-300 shrink-0">
                     Live Sync
+                  </span>
+                )}
+                {surgeStatus?.isActive && (
+                  <span className="rounded-md bg-amber-100/90 dark:bg-amber-950/70 border border-amber-300/80 dark:border-amber-700/60 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-900 dark:text-amber-300 shrink-0 font-mono-num">
+                    +{surgeStatus.bonusPercent}% Surge
                   </span>
                 )}
               </div>

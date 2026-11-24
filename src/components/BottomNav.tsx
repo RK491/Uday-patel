@@ -66,7 +66,7 @@ export function BottomNav({
                 <Icon className={`w-5 h-5 ${active ? 'stroke-[2.5]' : 'stroke-[2]'}`} />
                 {item.badge && (
                   <span
-                    className="animate-clay-badge absolute -top-1 -right-1.5 w-2.5 h-2.5 rounded-full bg-rose-500 border-2 border-white dark:border-stone-900 shadow-xs"
+                    className="animate-clay-badge absolute -top-1 -right-1.5 w-2.5 h-2.5 rounded-full bg-rose-500 border-2 border-[#3B261D] dark:border-stone-900 shadow-xs"
                     aria-label="Tasks available"
                   />
                 )}

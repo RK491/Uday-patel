@@ -43,6 +43,7 @@ import {
   createReferralCodeFromUid,
   decodeAchievementsAndAds,
   decodePromoLabelMeta,
+  getLeaderboardBadgeIds,
   decodeTaskSubtitleMeta,
   DEFAULT_AD_CONFIG,
   DEFAULT_ADMINS_CONFIG,
@@ -388,6 +389,7 @@ function toLeaderboardPayload(profile: UserFarmProfile) {
     eggs: Math.max(0, safeNonNegativeNum(profile.eggs, 0)),
     totalEggsCollected: Math.max(0, safeNonNegativeNum(profile.totalEggsCollected, 0)),
     chickensCount: Math.max(0, calculateTotalChickens(profile)),
+    badges: getLeaderboardBadgeIds(profile, 8),
     updatedAt: serverTimestamp(),
   };
 }
@@ -1673,6 +1675,11 @@ function parseLeaderboardEntryDoc(docSnap: { id: string; data: () => Record<stri
     eggs: Number(d.eggs ?? 0),
     totalEggsCollected: Number(d.totalEggsCollected ?? 0),
     chickensCount: Number(d.chickensCount ?? 0),
+    badges: Array.isArray(d.badges)
+      ? d.badges
+          .filter((v): v is string => typeof v === 'string' && v.trim().length > 0 && v.length <= 32)
+          .slice(0, 8)
+      : undefined,
   };
 }
 
@@ -4122,6 +4129,10 @@ export function subscribeToEconomyConfig(
       const resolved = resolveEconomyConfig({
         minWithdrawEggs: Number(d.minWithdrawEggs),
         perReferRewardCoins: Number(d.perReferRewardCoins),
+        reinvestSurge:
+          d.reinvestSurge && typeof d.reinvestSurge === 'object'
+            ? (d.reinvestSurge as EconomyConfig['reinvestSurge'])
+            : undefined,
         updatedAtMs: Number(d.updatedAtMs ?? 0),
       });
       cachedLiveEconomyConfig = resolved;

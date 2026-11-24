@@ -23,6 +23,51 @@ interface TopBarProps {
   onOpenDeposit: () => void;
 }
 
+function useAnimatedDisplayValue(
+  target: number,
+  uid: string,
+  prefersReducedMotion: boolean,
+): number {
+  const [displayValue, setDisplayValue] = useState(target);
+  const currentValRef = useRef(target);
+  const uidRef = useRef(uid);
+
+  useEffect(() => {
+    if (uidRef.current !== uid || prefersReducedMotion) {
+      uidRef.current = uid;
+      currentValRef.current = target;
+      setDisplayValue(target);
+      return;
+    }
+
+    const from = currentValRef.current;
+    if (from === target) return;
+
+    const startTime = performance.now();
+    const duration = Math.min(620, Math.max(260, Math.abs(target - from) > 100 ? 520 : 340));
+    let rafId = 0;
+
+    const step = (now: number) => {
+      const progress = Math.min(1, (now - startTime) / duration);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      const next = Math.round(from + (target - from) * eased);
+      currentValRef.current = next;
+      setDisplayValue(next);
+      if (progress < 1) {
+        rafId = window.requestAnimationFrame(step);
+      } else {
+        currentValRef.current = target;
+        setDisplayValue(target);
+      }
+    };
+
+    rafId = window.requestAnimationFrame(step);
+    return () => window.cancelAnimationFrame(rafId);
+  }, [target, uid, prefersReducedMotion]);
+
+  return displayValue;
+}
+
 export function TopBar({
   profile,
   coinsLabel,
@@ -40,20 +85,33 @@ export function TopBar({
   onOpenSettings,
   onOpenDeposit,
 }: TopBarProps) {
-  const prefersReducedMotion = useReducedMotion();
+  const prefersReducedMotion = Boolean(useReducedMotion());
+  const animatedCoins = useAnimatedDisplayValue(profile.coins, profile.uid, prefersReducedMotion);
+  const animatedEggs = useAnimatedDisplayValue(profile.eggs, profile.uid, prefersReducedMotion);
+
   const [coinArrivalPulse, setCoinArrivalPulse] = useState(0);
   const [floatingCoinDeltas, setFloatingCoinDeltas] = useState<Array<{ id: number; amount: number }>>([]);
   const [coinLiftSeq, setCoinLiftSeq] = useState(0);
+
+  const [eggArrivalPulse, setEggArrivalPulse] = useState(0);
+  const [floatingEggDeltas, setFloatingEggDeltas] = useState<Array<{ id: number; amount: number }>>([]);
+  const [eggLiftSeq, setEggLiftSeq] = useState(0);
+
   const prevUidRef = useRef<string>(profile.uid);
   const prevCoinsRef = useRef<number>(profile.coins);
+  const prevEggsRef = useRef<number>(profile.eggs);
   const floatSeqRef = useRef(0);
   const coinDeltaTimersRef = useRef<Set<number>>(new Set());
+  const eggDeltaTimersRef = useRef<Set<number>>(new Set());
 
   useEffect(() => {
-    const timers = coinDeltaTimersRef.current;
+    const coinTimers = coinDeltaTimersRef.current;
+    const eggTimers = eggDeltaTimersRef.current;
     return () => {
-      timers.forEach((id) => window.clearTimeout(id));
-      timers.clear();
+      coinTimers.forEach((id) => window.clearTimeout(id));
+      coinTimers.clear();
+      eggTimers.forEach((id) => window.clearTimeout(id));
+      eggTimers.clear();
     };
   }, []);
 
@@ -61,34 +119,59 @@ export function TopBar({
     if (prevUidRef.current !== profile.uid) {
       prevUidRef.current = profile.uid;
       prevCoinsRef.current = profile.coins;
+      prevEggsRef.current = profile.eggs;
       coinDeltaTimersRef.current.forEach((id) => window.clearTimeout(id));
       coinDeltaTimersRef.current.clear();
+      eggDeltaTimersRef.current.forEach((id) => window.clearTimeout(id));
+      eggDeltaTimersRef.current.clear();
       setFloatingCoinDeltas([]);
+      setFloatingEggDeltas([]);
       return;
     }
 
-    const delta = profile.coins - prevCoinsRef.current;
+    const coinDelta = profile.coins - prevCoinsRef.current;
     prevCoinsRef.current = profile.coins;
 
-    if (delta > 0) {
+    if (coinDelta > 0) {
       const nextId = ++floatSeqRef.current;
       setCoinLiftSeq((n) => n + 1);
-      setFloatingCoinDeltas((prev) => [...prev.slice(-2), { id: nextId, amount: delta }]);
+      setFloatingCoinDeltas((prev) => [...prev.slice(-2), { id: nextId, amount: coinDelta }]);
       const cleanupId = window.setTimeout(() => {
         coinDeltaTimersRef.current.delete(cleanupId);
         setFloatingCoinDeltas((prev) => prev.filter((item) => item.id !== nextId));
       }, 1150);
       coinDeltaTimersRef.current.add(cleanupId);
     }
-  }, [profile.coins, profile.uid]);
+
+    const eggDelta = profile.eggs - prevEggsRef.current;
+    prevEggsRef.current = profile.eggs;
+
+    if (eggDelta > 0) {
+      const nextId = ++floatSeqRef.current;
+      setEggLiftSeq((n) => n + 1);
+      setFloatingEggDeltas((prev) => [...prev.slice(-2), { id: nextId, amount: eggDelta }]);
+      const cleanupId = window.setTimeout(() => {
+        eggDeltaTimersRef.current.delete(cleanupId);
+        setFloatingEggDeltas((prev) => prev.filter((item) => item.id !== nextId));
+      }, 1250);
+      eggDeltaTimersRef.current.add(cleanupId);
+    }
+  }, [profile.coins, profile.eggs, profile.uid]);
 
   useEffect(() => {
     if (typeof window === 'undefined') return;
-    const handleArrival = () => {
+    const handleCoinArrival = () => {
       setCoinArrivalPulse((n) => n + 1);
     };
-    window.addEventListener('alphagram:coin-arrival', handleArrival);
-    return () => window.removeEventListener('alphagram:coin-arrival', handleArrival);
+    const handleEggArrival = () => {
+      setEggArrivalPulse((n) => n + 1);
+    };
+    window.addEventListener('alphagram:coin-arrival', handleCoinArrival);
+    window.addEventListener('alphagram:egg-arrival', handleEggArrival);
+    return () => {
+      window.removeEventListener('alphagram:coin-arrival', handleCoinArrival);
+      window.removeEventListener('alphagram:egg-arrival', handleEggArrival);
+    };
   }, []);
 
   return (
@@ -122,9 +205,9 @@ export function TopBar({
                   photoUrl={profile.photoUrl}
                   displayName={profile.displayName}
                   avatarColor={profile.avatarColor}
-                  className="w-9 h-9 text-sm border-2 border-white dark:border-stone-800"
+                  className="w-9 h-9 text-sm"
                 />
-                <span className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-full clay-btn-amber border-2 border-white dark:border-stone-900 text-[9px] font-extrabold flex items-center justify-center">
+                <span className="absolute -bottom-1 -right-1 w-4.5 h-4.5 rounded-full clay-btn-amber text-[9px] font-extrabold flex items-center justify-center">
                   {profile.level}
                 </span>
               </div>
@@ -187,7 +270,7 @@ export function TopBar({
               }
               className={`clay-btn h-10 px-2.5 sm:px-3 rounded-2xl flex items-center justify-center gap-1.5 text-xs font-extrabold whitespace-nowrap ${
                 isAllMuted
-                  ? 'bg-gradient-to-b from-rose-100 to-rose-200 dark:from-rose-950/90 dark:to-rose-900/80 border border-rose-300 dark:border-rose-700/70 text-rose-800 dark:text-rose-200 shadow-[0_6px_14px_-5px_rgba(225,29,72,0.28),0_2px_0_0_rgba(225,29,72,0.35),inset_0_2px_4px_rgba(255,255,255,0.6)]'
+                  ? 'bg-gradient-to-b from-rose-200 to-rose-300 dark:from-rose-900 dark:to-rose-950 border-2 border-[#881337] dark:border-rose-500 text-[#881337] dark:text-rose-100 shadow-[0_3px_0_#9F1239] dark:shadow-[0_3px_0_#090B14]'
                   : 'clay-btn-neutral text-stone-700 dark:text-stone-200'
               }`}
             >
@@ -230,8 +313,18 @@ export function TopBar({
                 initial={prefersReducedMotion ? false : { scale: 1.24, rotate: -12 }}
                 animate={{ scale: 1, rotate: 0 }}
                 transition={{ type: 'spring', stiffness: 440, damping: 18 }}
-                className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
+                className="relative w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
               >
+                {coinArrivalPulse > 0 && !prefersReducedMotion && (
+                  <motion.span
+                    key={`coin-halo-${coinArrivalPulse}`}
+                    aria-hidden="true"
+                    initial={{ opacity: 0.85, scale: 0.85 }}
+                    animate={{ opacity: 0, scale: 1.75 }}
+                    transition={{ duration: 0.55, ease: [0.16, 1, 0.3, 1] }}
+                    className="pointer-events-none absolute inset-0 rounded-xl border-2 border-emerald-400 shadow-[0_0_12px_rgba(16,185,129,0.7)]"
+                  />
+                )}
                 <CoinIcon className="w-5 h-5" />
               </motion.div>
               <div className="relative min-w-0">
@@ -284,7 +377,7 @@ export function TopBar({
                         : 'text-stone-900 dark:text-stone-100 transition-colors duration-300'
                   }`}
                 >
-                  {profile.coins.toLocaleString()}
+                  {animatedCoins.toLocaleString()}
                 </motion.div>
                 <div className="text-[10px] font-bold tracking-wide text-stone-500 dark:text-stone-400 mt-0.5">
                   {profile.coins < 0 ? `${coinsLabel} (Debt)` : coinsLabel}
@@ -302,31 +395,91 @@ export function TopBar({
             </motion.button>
           </motion.div>
 
-          <div className="clay-card !rounded-2xl flex items-center gap-2 px-3 py-1.5">
+          <motion.div
+            key={`egg-card-${eggArrivalPulse}`}
+            animate={
+              eggArrivalPulse > 0 && !prefersReducedMotion
+                ? { scale: [1, 1.06, 0.985, 1] }
+                : { scale: 1 }
+            }
+            transition={{ duration: 0.38, ease: [0.16, 1, 0.3, 1] }}
+            className="clay-card relative !rounded-2xl flex items-center gap-2 px-3 py-1.5"
+          >
             <motion.div
-              key={`egg-icon-${profile.eggs}`}
-              initial={{ scale: 1.18, rotate: 10 }}
-              animate={{ scale: 1, rotate: 0 }}
-              transition={{ type: 'spring', stiffness: 420, damping: 20 }}
-              className="w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
+              key={`egg-icon-${profile.eggs}-${eggArrivalPulse}`}
+              data-egg-balance-target="true"
+              initial={prefersReducedMotion ? false : { scale: 1.26, rotate: 12 }}
+              animate={{ scale: [1.26, 0.94, 1.04, 1], rotate: [12, -6, 0] }}
+              transition={{ duration: 0.44, ease: [0.16, 1, 0.3, 1] }}
+              className="relative w-8 h-8 rounded-xl clay-icon-well flex items-center justify-center shrink-0"
             >
+              {eggArrivalPulse > 0 && !prefersReducedMotion && (
+                <motion.span
+                  key={`egg-halo-${eggArrivalPulse}`}
+                  aria-hidden="true"
+                  initial={{ opacity: 0.9, scale: 0.8 }}
+                  animate={{ opacity: 0, scale: 1.9 }}
+                  transition={{ duration: 0.58, ease: [0.16, 1, 0.3, 1] }}
+                  className="pointer-events-none absolute inset-0 rounded-xl border-2 border-amber-400 shadow-[0_0_16px_rgba(245,158,11,0.75)]"
+                />
+              )}
               <EggIcon className="w-5 h-5" />
             </motion.div>
-            <div className="min-w-0">
+            <div className="relative min-w-0">
+              <AnimatePresence>
+                {!prefersReducedMotion &&
+                  floatingEggDeltas.map((delta) => (
+                    <motion.span
+                      key={delta.id}
+                      aria-hidden="true"
+                      initial={{ opacity: 0, y: 6, scale: 0.85 }}
+                      animate={{
+                        opacity: [0, 1, 1, 0],
+                        y: [6, -7, -17, -25],
+                        scale: [0.85, 1.08, 1, 0.94],
+                      }}
+                      exit={{ opacity: 0 }}
+                      transition={{
+                        duration: 1.15,
+                        times: [0, 0.18, 0.72, 1],
+                        ease: [0.16, 1, 0.3, 1],
+                      }}
+                      className="pointer-events-none absolute -top-2 left-0 z-20 inline-flex items-center gap-0.5 rounded-full bg-gradient-to-r from-amber-500 to-orange-500 px-1.5 py-0.5 text-[10px] font-extrabold font-mono-num text-white shadow-md whitespace-nowrap"
+                    >
+                      +{delta.amount.toLocaleString()}
+                    </motion.span>
+                  ))}
+              </AnimatePresence>
               <motion.div
-                key={profile.eggs}
-                initial={{ scale: 1.09 }}
-                animate={{ scale: 1 }}
-                transition={{ duration: 0.22, ease: [0.16, 1, 0.3, 1] }}
-                className="text-sm sm:text-base font-extrabold text-stone-900 dark:text-stone-100 font-mono-num leading-none truncate origin-left"
+                key={`eggs-${profile.eggs}-${eggLiftSeq}`}
+                initial={
+                  prefersReducedMotion
+                    ? false
+                    : eggLiftSeq > 0
+                      ? { y: 4, scale: 1.14 }
+                      : { scale: 1.06 }
+                }
+                animate={
+                  prefersReducedMotion
+                    ? { scale: 1 }
+                    : eggLiftSeq > 0
+                      ? { y: [4, -3, 0], scale: [1.14, 1.06, 1] }
+                      : { y: 0, scale: 1 }
+                }
+                transition={{ duration: 0.4, ease: [0.16, 1, 0.3, 1] }}
+                className={`text-sm sm:text-base font-extrabold font-mono-num leading-none truncate origin-left ${
+                  eggLiftSeq > 0
+                    ? 'text-amber-700 dark:text-amber-300 transition-colors duration-300'
+                    : 'text-stone-900 dark:text-stone-100 transition-colors duration-300'
+                }`}
               >
-                {profile.eggs.toLocaleString()}
+                {animatedEggs.toLocaleString()}
               </motion.div>
               <div className="text-[10px] font-bold tracking-wide text-stone-500 dark:text-stone-400 mt-0.5">
                 {eggsLabel}
               </div>
             </div>
-          </div>
+          </motion.div>
         </div>
       </div>
     </header>

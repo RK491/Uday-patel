@@ -607,19 +607,96 @@ export function resolveApiUrl(endpointPath: string): string {
   return cleanPath;
 }
 
+export function resolveApiCandidateUrls(endpointPath: string): string[] {
+  const cleanPath = endpointPath.startsWith('/') ? endpointPath : `/${endpointPath}`;
+  const candidates: string[] = [];
+  const pushUnique = (url: string) => {
+    if (url && !candidates.includes(url)) {
+      candidates.push(url);
+    }
+  };
+
+  pushUnique(resolveApiUrl(cleanPath));
+
+  if (typeof window !== 'undefined' && window.location?.origin) {
+    const sameOriginUrl = new URL(cleanPath, window.location.origin).toString();
+    pushUnique(sameOriginUrl);
+
+    // If running under ais-dev- where Google SSO blocks external Telegram WebViews, try paired public ais-pre- backend
+    try {
+      const loc = new URL(window.location.origin);
+      const host = loc.hostname.toLowerCase();
+      if (host.startsWith('ais-dev-')) {
+        const preOrigin = `${loc.protocol}//ais-pre-${host.slice('ais-dev-'.length)}${loc.port ? `:${loc.port}` : ''}`;
+        pushUnique(`${preOrigin}${cleanPath}`);
+      }
+    } catch {
+      // Ignore URL parse errors
+    }
+  }
+
+  return candidates;
+}
+
+export async function fetchApiWithFallback(
+  endpointPath: string,
+  init?: RequestInit,
+): Promise<{ response: Response; contentType: string; isJson: boolean; usedUrl: string }> {
+  const candidates =
+    endpointPath.startsWith('http://') || endpointPath.startsWith('https://')
+      ? [endpointPath]
+      : resolveApiCandidateUrls(endpointPath);
+
+  let lastResponse: Response | null = null;
+  let lastContentType = '';
+  let lastUsedUrl = candidates[0] || endpointPath;
+  let lastError: unknown = null;
+
+  for (let i = 0; i < candidates.length; i += 1) {
+    const candidateUrl = candidates[i];
+    try {
+      const response = await fetch(candidateUrl, init);
+      const contentType = (response.headers.get('content-type') || '').toLowerCase();
+      const isJson = contentType.includes('application/json');
+      const isRetryableMissing =
+        !isJson || response.status === 404 || response.status === 405 || response.status === 502 || response.status === 503;
+
+      if (!isRetryableMissing || i === candidates.length - 1) {
+        return { response, contentType, isJson, usedUrl: candidateUrl };
+      }
+
+      lastResponse = response;
+      lastContentType = contentType;
+      lastUsedUrl = candidateUrl;
+    } catch (err) {
+      lastError = err;
+      if (i === candidates.length - 1 && !lastResponse) {
+        throw err;
+      }
+    }
+  }
+
+  if (lastResponse) {
+    return {
+      response: lastResponse,
+      contentType: lastContentType,
+      isJson: lastContentType.includes('application/json'),
+      usedUrl: lastUsedUrl,
+    };
+  }
+  throw lastError instanceof Error ? lastError : new Error('Backend server unreachable');
+}
+
 export async function safeFetchJson<T>(
   url: string,
   init?: RequestInit,
 ): Promise<T | null> {
   try {
-    const targetUrl = url.startsWith('http://') || url.startsWith('https://') ? url : resolveApiUrl(url);
-    const res = await fetch(targetUrl, init);
-    if (!res.ok) return null;
-    const contentType = (res.headers.get('content-type') || '').toLowerCase();
-    if (!contentType.includes('application/json')) {
+    const { response, isJson } = await fetchApiWithFallback(url, init);
+    if (!response.ok || !isJson) {
       return null;
     }
-    return (await res.json()) as T;
+    return (await response.json()) as T;
   } catch {
     return null;
   }

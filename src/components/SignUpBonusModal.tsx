@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { CheckCircle2, Gift, Sparkles } from 'lucide-react';
 import { SIGNUP_BONUS_COINS } from '../game/economy';
-import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
+import animeHenMascot from '../assets/images/anime_hen_mascot_1795509839642.jpg';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
 
 interface SignUpBonusModalProps {
@@ -14,7 +14,7 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-b from-[#FFFDF7] via-[#FAF6EA] to-[#FEF0C7] dark:from-[#0F1115] dark:via-[#14171D] dark:to-[#1F1A11] select-none"
+      className="animate-clay-backdrop fixed inset-0 z-50 min-h-[100dvh] w-full overflow-y-auto bg-gradient-to-b from-[#FFFBF0] via-[#FFF4E0] to-[#FCE7F3] dark:from-[#121526] dark:via-[#191E36] dark:to-[#241B2E] select-none"
       role="dialog"
       aria-modal="true"
       aria-labelledby="signup-bonus-title"
@@ -46,14 +46,14 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
         {/* Center Hero Stage */}
         <main className="flex-1 flex flex-col items-center justify-center text-center space-y-5 py-2">
           <div className="relative flex items-center justify-center">
-            <div className="animate-clay-float w-32 h-32 sm:w-36 sm:h-36 rounded-[2.2rem] clay-card-warm p-2 flex items-center justify-center overflow-hidden">
+            <div className="animate-clay-float w-32 h-32 sm:w-36 sm:h-36 rounded-[1.8rem] clay-card-warm p-1.5 flex items-center justify-center overflow-hidden">
               {!imgFailed ? (
                 <img
-                  src={clayHenMascot}
-                  alt="Claymorphism Alpha Gram hen mascot with golden coin and egg"
+                  src={animeHenMascot}
+                  alt="Anime cel-shaded Alpha Gram hen mascot holding a golden coin beside an egg"
                   referrerPolicy="no-referrer"
                   onError={() => setImgFailed(true)}
-                  className="w-full h-full object-cover rounded-[1.7rem]"
+                  className="w-full h-full object-cover rounded-[1.35rem]"
                 />
               ) : (
                 <ChickenSprite breed="leghorn" className="w-20 h-20" />

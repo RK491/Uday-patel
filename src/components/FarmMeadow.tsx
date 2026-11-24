@@ -1,8 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ArrowUpRight, Award, Bot, Feather, Flame, Package, Sparkles, Star, X, Zap } from 'lucide-react';
+import { ArrowUpRight, Award, Bot, Feather, Flame, Package, RefreshCw, Sparkles, Star, X, Zap } from 'lucide-react';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
+import type { ChickenBreedId, EconomyConfig, UserFarmProfile } from '../types/farm';
 import {
   calculateProductionRate,
   calculateTotalChickens,
@@ -12,6 +12,7 @@ import {
   COOP_FEVER_REQUIRED_ADS,
   FEED_BOOSTER_COST_COINS,
   formatGoldenEggCooldownWait,
+  getActiveReinvestSurgeStatus,
   getChickenMilestoneReached,
   getCoopFeverProgress,
   getGoldenEggCooldownRemainingMs,
@@ -29,11 +30,13 @@ interface FarmMeadowProps {
   profile: UserFarmProfile;
   pendingEggs: number;
   collectLabel: string;
+  economyConfig?: Partial<EconomyConfig> | null;
   isVisible?: boolean;
   isProfileSynced?: boolean;
   onCollect: () => void;
   onOpenYourFarm: () => void;
   onOpenWithdraw?: () => void;
+  onOpenReinvest?: () => void;
   onChickenTap: () => void;
   onGoldenEggDrop?: () => void;
   onActivateBooster?: () => void;
@@ -67,34 +70,53 @@ interface MeadowParticle {
 
 interface FlyingEggParticle {
   id: string;
-  startX: number;
-  startY: number;
-  midX: number;
-  midY: number;
-  endX: number;
-  endY: number;
+  xs: number[];
+  ys: number[];
   delay: number;
   duration: number;
   rotateDeg: number;
+  isGolden: boolean;
+}
+
+function sampleQuadraticBezierPath(
+  startX: number,
+  startY: number,
+  ctrlX: number,
+  ctrlY: number,
+  endX: number,
+  endY: number,
+  steps = 9,
+): { xs: number[]; ys: number[] } {
+  const xs: number[] = [];
+  const ys: number[] = [];
+  for (let i = 0; i <= steps; i += 1) {
+    const t = i / steps;
+    const inv = 1 - t;
+    const x = inv * inv * startX + 2 * inv * t * ctrlX + t * t * endX;
+    const y = inv * inv * startY + 2 * inv * t * ctrlY + t * t * endY;
+    xs.push(Math.round(x * 10) / 10);
+    ys.push(Math.round(y * 10) / 10);
+  }
+  return { xs, ys };
 }
 
 const SPAWN_SPOTS = [
-  { x: 45, y: 55 },
-  { x: 56, y: 58 },
-  { x: 38, y: 50 },
-  { x: 64, y: 61 },
-  { x: 51, y: 49 },
-  { x: 69, y: 56 },
-  { x: 41, y: 59 },
-  { x: 59, y: 52 },
-  { x: 47, y: 63 },
-  { x: 34, y: 47 },
-  { x: 62, y: 65 },
-  { x: 53, y: 60 },
-  { x: 72, y: 59 },
-  { x: 43, y: 46 },
-  { x: 49, y: 65 },
-  { x: 67, y: 51 },
+  { x: 48, y: 52 },
+  { x: 58, y: 55 },
+  { x: 38, y: 49 },
+  { x: 64, y: 58 },
+  { x: 52, y: 46 },
+  { x: 68, y: 52 },
+  { x: 42, y: 58 },
+  { x: 56, y: 49 },
+  { x: 46, y: 61 },
+  { x: 34, y: 53 },
+  { x: 61, y: 62 },
+  { x: 51, y: 57 },
+  { x: 70, y: 56 },
+  { x: 42, y: 45 },
+  { x: 49, y: 64 },
+  { x: 65, y: 47 },
 ];
 
 function getStoredMilestone(uid: string): number {
@@ -130,11 +152,13 @@ export function FarmMeadow({
   profile,
   pendingEggs,
   collectLabel,
+  economyConfig,
   isVisible = true,
   isProfileSynced = true,
   onCollect,
   onOpenYourFarm,
   onOpenWithdraw,
+  onOpenReinvest,
   onChickenTap,
   onGoldenEggDrop,
   onActivateBooster,
@@ -152,6 +176,7 @@ export function FarmMeadow({
   const [meadowParticles, setMeadowParticles] = useState<MeadowParticle[]>([]);
   const [isCollectPopping, setIsCollectPopping] = useState(false);
   const [collectRippleSeq, setCollectRippleSeq] = useState(0);
+  const [collectCheerSeq, setCollectCheerSeq] = useState(0);
   const [flyingEggs, setFlyingEggs] = useState<FlyingEggParticle[]>([]);
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
@@ -173,6 +198,7 @@ export function FarmMeadow({
   const collectBtnRef = useRef<HTMLButtonElement | null>(null);
   const popTimerRef = useRef<number | null>(null);
   const collectPopTimerRef = useRef<number | null>(null);
+  const collectCheerTimerRef = useRef<number | null>(null);
   const harvestTimerRef = useRef<number | null>(null);
   const effectTimersRef = useRef<number[]>([]);
 
@@ -380,6 +406,7 @@ export function FarmMeadow({
     return () => {
       if (popTimerRef.current) window.clearTimeout(popTimerRef.current);
       if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
+      if (collectCheerTimerRef.current) window.clearTimeout(collectCheerTimerRef.current);
       if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
       for (const timerId of effectTimersRef.current) {
         window.clearTimeout(timerId);
@@ -388,8 +415,7 @@ export function FarmMeadow({
     };
   }, []);
 
-  const triggerCollectEffects = () => {
-    spawnMeadowParticleBurst('egg_collect', 1);
+  const triggerCollectPressFeedback = () => {
     setIsCollectPopping(false);
     window.requestAnimationFrame(() => {
       setIsCollectPopping(true);
@@ -399,74 +425,125 @@ export function FarmMeadow({
     collectPopTimerRef.current = window.setTimeout(() => {
       setIsCollectPopping(false);
     }, 460);
+  };
+
+  const triggerCollectEffects = (collectedAmount: number) => {
+    const safeAmount = Math.max(1, Math.round(collectedAmount));
+    const nextSeq = ++harvestSeqRef.current;
+    setHarvestBurst({ seq: nextSeq, amount: safeAmount });
+    if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
+    harvestTimerRef.current = window.setTimeout(() => {
+      setHarvestBurst((cur) => (cur?.seq === nextSeq ? null : cur));
+    }, 1500);
+
+    spawnMeadowParticleBurst('egg_collect', 1);
+    triggerCollectPressFeedback();
+    setCollectCheerSeq((s) => s + 1);
+    if (collectCheerTimerRef.current) window.clearTimeout(collectCheerTimerRef.current);
+    collectCheerTimerRef.current = window.setTimeout(() => {
+      setCollectCheerSeq(0);
+    }, 620);
 
     if (prefersReducedMotion || typeof window === 'undefined') {
-      window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
+      window.dispatchEvent(new CustomEvent('alphagram:egg-arrival'));
       return;
     }
 
     const btnRect = collectBtnRef.current?.getBoundingClientRect();
-    const targetEl = document.querySelector('[data-coin-balance-target="true"]');
+    const targetEl =
+      document.querySelector('[data-egg-balance-target="true"]') ||
+      document.querySelector('[data-coin-balance-target="true"]');
     const targetRect = targetEl?.getBoundingClientRect();
 
-    const originX = btnRect ? btnRect.left + btnRect.width * 0.32 : window.innerWidth * 0.65;
-    const originY = btnRect ? btnRect.top + btnRect.height * 0.45 : window.innerHeight * 0.6;
+    const originX = btnRect ? btnRect.left + btnRect.width * 0.32 : window.innerWidth * 0.68;
+    const originY = btnRect ? btnRect.top + btnRect.height * 0.45 : window.innerHeight * 0.72;
     const endX =
       targetRect && targetRect.width > 0 && targetRect.height > 0
         ? targetRect.left + targetRect.width / 2
-        : window.innerWidth * 0.22;
+        : window.innerWidth * 0.72;
     const endY =
       targetRect && targetRect.width > 0 && targetRect.height > 0
         ? targetRect.top + targetRect.height / 2
         : 84;
 
+    const henButtons = Array.from(
+      sectionRef.current?.querySelectorAll('[data-roaming-hen="true"]') ?? [],
+    );
+    const henOrigins = henButtons
+      .slice(0, 6)
+      .map((el) => el.getBoundingClientRect())
+      .filter((r) => r.width > 0 && r.height > 0)
+      .map((r) => ({ x: r.left + r.width / 2, y: r.top + r.height * 0.55 }));
+
     const batchId = ++flyingBatchSeqRef.current;
-    const count = 8;
+    const count = safeAmount >= 500 ? 12 : safeAmount >= 80 ? 9 : 7;
     const created: FlyingEggParticle[] = Array.from({ length: count }, (_, idx) => {
-      const spreadX = (idx - (count - 1) / 2) * 14;
-      const spreadY = ((idx % 3) - 1) * 7;
-      const startX = originX + spreadX;
-      const startY = originY + spreadY;
-      const arcBend = (idx % 2 === 0 ? -1 : 1) * (24 + (idx % 4) * 14);
-      const midX = (startX + endX) / 2 + arcBend;
-      const midY = Math.min(startY, endY) - 44 - (idx % 3) * 24;
+      const fromHen = henOrigins.length > 0 && idx % 2 === 1;
+      const source = fromHen
+        ? henOrigins[Math.floor(idx / 2) % henOrigins.length]
+        : {
+            x: originX + (idx - (count - 1) / 2) * 11,
+            y: originY + ((idx % 3) - 1) * 6,
+          };
+
+      const startX = source.x;
+      const startY = source.y;
+      const arcSpread = (idx % 2 === 0 ? -1 : 1) * (36 + (idx % 4) * 18);
+      const ctrlX = (startX + endX) / 2 + arcSpread;
+      const ctrlY = Math.min(startY, endY) - 65 - (idx % 3) * 28;
+      const { xs, ys } = sampleQuadraticBezierPath(startX, startY, ctrlX, ctrlY, endX, endY, 9);
+
       return {
         id: `fly-egg-${batchId}-${idx}`,
-        startX,
-        startY,
-        midX,
-        midY,
-        endX,
-        endY,
-        delay: idx * 0.045,
-        duration: 0.64 + (idx % 3) * 0.06,
-        rotateDeg: (idx % 2 === 0 ? 1 : -1) * (18 + idx * 5),
+        xs,
+        ys,
+        delay: idx * 0.038,
+        duration: 0.62 + (idx % 3) * 0.06,
+        rotateDeg: (idx % 2 === 0 ? 1 : -1) * (20 + idx * 5),
+        isGolden: safeAmount >= 150 && (idx === 0 || idx === count - 1),
       };
     });
 
-    setFlyingEggs((prev) => [...prev.slice(-16), ...created]);
+    setFlyingEggs((prev) => [...prev.slice(-18), ...created]);
 
-    const arrivalTimer = window.setTimeout(() => {
-      window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
-    }, 600);
+    const firstArrivalTimer = window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('alphagram:egg-arrival'));
+    }, 520);
+    const secondArrivalTimer = window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent('alphagram:egg-arrival'));
+    }, 760);
     const cleanupTimer = window.setTimeout(() => {
       const ids = new Set(created.map((p) => p.id));
       setFlyingEggs((prev) => prev.filter((p) => !ids.has(p.id)));
-    }, 1250);
-    effectTimersRef.current.push(arrivalTimer, cleanupTimer);
+    }, 1450);
+    effectTimersRef.current.push(firstArrivalTimer, secondArrivalTimer, cleanupTimer);
   };
+
+  const triggerCollectEffectsRef = useRef(triggerCollectEffects);
+  triggerCollectEffectsRef.current = triggerCollectEffects;
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleEggsCollected = (ev: Event) => {
+      const customEv = ev as CustomEvent<{ amount?: number }>;
+      const collected = Math.max(1, Number(customEv.detail?.amount ?? pendingEggs) || 1);
+      triggerCollectEffectsRef.current(collected);
+    };
+    window.addEventListener('alphagram:eggs-collected', handleEggsCollected);
+    return () => window.removeEventListener('alphagram:eggs-collected', handleEggsCollected);
+  }, [pendingEggs]);
 
   const roamingHens: RoamingHen[] = useMemo(() => {
     return baseHens.map((breed, idx) => {
       const spot = SPAWN_SPOTS[idx % SPAWN_SPOTS.length];
       const phase = (stepTick + idx) % 4;
-      const dx = phase === 0 ? 0 : phase === 1 ? 3.8 : phase === 2 ? 1.8 : -3.4;
-      const dy = phase === 0 ? 0 : phase === 1 ? -1.8 : phase === 2 ? 2.1 : -0.9;
+      const dx = phase === 0 ? 0 : phase === 1 ? 3.5 : phase === 2 ? 1.7 : -3.1;
+      const dy = phase === 0 ? 0 : phase === 1 ? -1.6 : phase === 2 ? 1.9 : -0.8;
       return {
         id: `${breed}-${idx}`,
         breed,
-        x: Math.max(24, Math.min(74, spot.x + dx)),
-        y: Math.max(41, Math.min(64, spot.y + dy)),
+        x: Math.max(27, Math.min(72, spot.x + dx)),
+        y: Math.max(43, Math.min(66, spot.y + dy)),
         facingLeft: phase >= 2,
         delayMs: (idx % 5) * 200,
       };
@@ -476,17 +553,18 @@ export function FarmMeadow({
   const fillPct = Math.min(100, Math.round((pendingEggs / Math.max(1, profile.basketCapacity)) * 100));
   const boosterCardState = totalChickens <= 0 ? 'idle' : boosterActive ? 'active' : 'ready';
   const feverCardState = feverActive ? 'active' : feverProgress.ready ? 'ready' : 'charging';
+  const surgeStatus = getActiveReinvestSurgeStatus(economyConfig, liveNowMs);
   const cardTransition = { duration: 0.28, ease: [0.22, 1, 0.36, 1] as const };
 
   return (
     <motion.section
       ref={sectionRef}
       data-farm-paused={!isFarmActive ? 'true' : undefined}
-      aria-label="Live Isometric Sustainable Poultry Estate"
+      aria-label="Live Anime Countryside Poultry Sanctuary"
       initial={prefersReducedMotion ? false : { opacity: 0, y: 10, scale: 0.988 }}
       animate={{ opacity: 1, y: 0, scale: 1 }}
       transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-      className="relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[2rem] lg:clay-card bg-gradient-to-b from-amber-200 via-emerald-800 to-stone-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
+      className="relative w-full flex-1 lg:flex-none overflow-hidden rounded-none lg:rounded-[1.75rem] lg:clay-card bg-gradient-to-b from-sky-200 via-emerald-600 to-emerald-950 min-h-[540px] h-full lg:h-auto lg:aspect-[9/14] lg:min-h-[600px] lg:max-h-[760px]"
     >
       {/* Locked-camera isometric farm stage: buildings/walls/roads completely static, internal natural elements alive */}
       <LivingFarmEffects
@@ -504,6 +582,7 @@ export function FarmMeadow({
             <button
               key={hen.id}
               type="button"
+              data-roaming-hen="true"
               onClick={() => {
                 const triggeredGold = goldenReady && Boolean(onGoldenEggDrop);
                 const nextSeq = ++chirpSeqRef.current;
@@ -591,8 +670,8 @@ export function FarmMeadow({
                   className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-3 rounded-full bg-stone-950/45 blur-[3px]"
                 />
                 <div
-                  key={isPopping ? `pop-${poppedHen.seq}` : 'idle'}
-                  className={isPopping ? 'animate-chicken-pop' : ''}
+                  key={isPopping ? `pop-${poppedHen.seq}` : collectCheerSeq > 0 ? `cheer-${collectCheerSeq}` : 'idle'}
+                  className={isPopping || collectCheerSeq > 0 ? 'animate-chicken-pop' : ''}
                 >
                   <div
                     className="animate-chicken-bob"
@@ -626,9 +705,9 @@ export function FarmMeadow({
         />
       )}
 
-      {/* Top sky & bottom earth scrims for natural outdoor readability */}
-      <div className="absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-stone-950/50 via-stone-950/20 to-transparent pointer-events-none" />
-      <div className="absolute inset-x-0 bottom-0 h-52 bg-gradient-to-t from-stone-950/80 via-stone-950/35 to-transparent pointer-events-none" />
+      {/* Gentle sky & creek ground scrims for crisp anime HUD readability */}
+      <div className="absolute inset-x-0 top-0 h-24 bg-gradient-to-b from-[#2D1E18]/35 via-[#2D1E18]/12 to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 bottom-0 h-48 bg-gradient-to-t from-[#1A130F]/75 via-[#2D1E18]/30 to-transparent pointer-events-none" />
 
       {/* Top Mining HUD: 2x Feed Booster + Golden Egg Alert + GRAM Payout Status */}
       <AnimatePresence>
@@ -650,9 +729,9 @@ export function FarmMeadow({
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.95 }}
                     transition={cardTransition}
-                    className="pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 backdrop-blur-md border border-white/15 px-3 py-2 text-[11px] font-extrabold text-stone-100 inline-flex items-center gap-1.5 shadow-lg"
+                    className="pointer-events-auto min-h-[44px] rounded-2xl bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 border-2 border-[#3B261D] dark:border-[#4D598A] px-3 py-2 text-[11px] font-extrabold text-[#2D1E18] dark:text-[#F5F2EB] inline-flex items-center gap-1.5 shadow-[0_3px_0_rgba(59,38,29,0.55)]"
                   >
-                    <EggIcon className="w-3.5 h-3.5 opacity-75 shrink-0" />
+                    <EggIcon className="w-3.5 h-3.5 opacity-80 shrink-0" />
                     <span>Mining Idle · 0 Hens</span>
                   </motion.div>
                 ) : boosterActive ? (
@@ -662,7 +741,7 @@ export function FarmMeadow({
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.94 }}
                     transition={cardTransition}
-                    className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg"
+                    className="clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-2 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5"
                   >
                     <Zap className="w-3.5 h-3.5 fill-current shrink-0" />
                     <span className="font-mono-num">2× Feed · {formatCountdownMs(boostRemainingMs)}</span>
@@ -679,9 +758,9 @@ export function FarmMeadow({
                     whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
                     whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
                     transition={cardTransition}
-                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-amber-300/35 px-3 py-2 text-[11px] font-extrabold text-amber-100 inline-flex items-center gap-1.5 shadow-lg"
+                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 hover:bg-[#FEF9C3] dark:hover:bg-[#272D4A] border-2 border-[#3B261D] dark:border-amber-400/70 px-3 py-2 text-[11px] font-extrabold text-[#3B261D] dark:text-amber-100 inline-flex items-center gap-1.5 shadow-[0_3px_0_#3B261D] dark:shadow-[0_3px_0_#090B14]"
                   >
-                    <Zap className="w-3.5 h-3.5 text-amber-400 fill-amber-400 shrink-0" />
+                    <Zap className="w-3.5 h-3.5 text-amber-500 fill-amber-400 shrink-0" />
                     <span>2× Boost ({FEED_BOOSTER_COST_COINS})</span>
                   </motion.button>
                 ) : null}
@@ -714,9 +793,9 @@ export function FarmMeadow({
                       whileHover={!prefersReducedMotion ? { y: -1, scale: 1.02 } : undefined}
                       whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
                       transition={cardTransition}
-                      className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/70 hover:bg-stone-900/80 backdrop-blur-md border border-amber-400/30 px-2.5 py-2 text-[11px] font-extrabold text-amber-200 inline-flex items-center gap-1 shadow-lg"
+                      className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 hover:bg-[#FEF3C7] dark:hover:bg-[#272D4A] border-2 border-[#3B261D] dark:border-amber-400/70 px-2.5 py-2 text-[11px] font-extrabold text-[#78350F] dark:text-amber-200 inline-flex items-center gap-1 shadow-[0_3px_0_#3B261D] dark:shadow-[0_3px_0_#090B14]"
                     >
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400/80 shrink-0" />
+                      <Sparkles className="w-3.5 h-3.5 text-amber-500 shrink-0" />
                       <span className="font-mono-num tabular-nums">{formatCountdownMs(goldenRemainingMs)}</span>
                     </motion.button>
                   ) : null}
@@ -732,19 +811,19 @@ export function FarmMeadow({
                     whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
                     whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
                     transition={{ ...cardTransition, delay: 0.04 }}
-                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-stone-950/75 hover:bg-stone-900/85 backdrop-blur-md border border-emerald-400/35 px-3 py-2 text-[11px] font-extrabold text-white inline-flex items-center gap-1.5 shadow-lg"
+                    className="clay-btn pointer-events-auto min-h-[44px] rounded-2xl bg-[#ECFDF5]/95 dark:bg-[#132924]/95 hover:bg-[#D1FAE5] dark:hover:bg-[#17362F] border-2 border-[#064E3B] dark:border-emerald-500 px-3 py-2 text-[11px] font-extrabold text-[#064E3B] dark:text-emerald-100 inline-flex items-center gap-1.5 shadow-[0_3px_0_#065F46] dark:shadow-[0_3px_0_#07100E]"
                   >
                     <span
                       aria-hidden="true"
                       className={`w-2 h-2 rounded-full shrink-0 ${
-                        adGate.unlocked ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                        adGate.unlocked ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'
                       }`}
                     />
                     <span>Withdraw</span>
-                    <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-white/10 text-emerald-300">
+                    <span className="font-mono-num text-[10px] px-1.5 py-0.5 rounded-md bg-emerald-600/15 dark:bg-emerald-400/20 text-emerald-800 dark:text-emerald-200 border border-emerald-700/25">
                       {adGate.unlocked ? 'Ready' : `${adGate.watched}/${adGate.required}`}
                     </span>
-                    <ArrowUpRight className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                    <ArrowUpRight className="w-3.5 h-3.5 text-emerald-700 dark:text-emerald-300 shrink-0" />
                   </motion.button>
                 )}
               </div>
@@ -760,7 +839,7 @@ export function FarmMeadow({
                     animate={{ opacity: 1, y: 0, scale: 1 }}
                     exit={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, scale: 0.94 }}
                     transition={{ ...cardTransition, delay: 0.06 }}
-                    className="pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-500 to-orange-500 text-amber-950 border border-amber-200/70 text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg"
+                    className="pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl bg-gradient-to-r from-amber-400 to-orange-500 text-[#3B1806] border-2 border-[#3B261D] text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-[0_3px_0_#92400E]"
                   >
                     <Flame className="w-3.5 h-3.5 fill-current shrink-0" />
                     <span className="font-mono-num">
@@ -787,15 +866,15 @@ export function FarmMeadow({
                     whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
                     whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
                     transition={{ ...cardTransition, delay: 0.06 }}
-                    className={`clay-btn pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                    className={`clay-btn pointer-events-auto min-h-[40px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 ${
                       feverProgress.ready
-                        ? 'bg-gradient-to-r from-amber-400 via-orange-400 to-amber-300 text-amber-950 border border-amber-200 animate-pulse'
-                        : 'bg-stone-950/72 hover:bg-stone-900/85 backdrop-blur-md border border-orange-400/35 text-amber-100'
+                        ? 'clay-btn-amber animate-pulse'
+                        : 'bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 hover:bg-[#FFEDD5] dark:hover:bg-[#2B2420] border-2 border-[#3B261D] dark:border-orange-400/70 text-[#9A3412] dark:text-amber-100 shadow-[0_3px_0_#3B261D] dark:shadow-[0_3px_0_#090B14]'
                     }`}
                   >
                     <Flame
                       className={`w-3.5 h-3.5 shrink-0 ${
-                        feverProgress.ready ? 'text-orange-700 fill-orange-700' : 'text-orange-400'
+                        feverProgress.ready ? 'text-orange-800 fill-orange-700' : 'text-orange-500'
                       }`}
                     />
                     {feverProgress.ready ? (
@@ -819,13 +898,13 @@ export function FarmMeadow({
                 whileHover={!prefersReducedMotion ? { y: -1.5, scale: 1.02 } : undefined}
                 whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
                 transition={{ ...cardTransition, delay: 0.09 }}
-                className={`clay-btn pointer-events-auto ml-auto min-h-[40px] px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 shadow-lg ${
+                className={`clay-btn pointer-events-auto ml-auto min-h-[40px] px-2.5 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5 ${
                   droneActive
-                    ? 'bg-sky-950/80 backdrop-blur-md border border-sky-400/45 text-sky-200'
-                    : 'bg-stone-950/65 hover:bg-stone-900/80 backdrop-blur-md border border-white/15 text-stone-200'
+                    ? 'bg-sky-400 border-2 border-[#0C4A6E] text-[#082F49] shadow-[0_3px_0_#075985]'
+                    : 'bg-[#FFFDF7]/95 dark:bg-[#1E233A]/95 hover:bg-[#F0F9FF] dark:hover:bg-[#252D4A] border-2 border-[#3B261D] dark:border-[#4D598A] text-[#2D1E18] dark:text-stone-100 shadow-[0_3px_0_#3B261D] dark:shadow-[0_3px_0_#090B14]'
                 }`}
               >
-                <Bot className={`w-3.5 h-3.5 shrink-0 ${droneActive ? 'text-sky-400' : 'text-stone-400'}`} />
+                <Bot className={`w-3.5 h-3.5 shrink-0 ${droneActive ? 'text-[#082F49]' : 'text-sky-600 dark:text-sky-400'}`} />
                 <span className="font-mono-num tabular-nums">
                   {droneActive
                     ? `Drone ${droneRemainingMs >= 3_600_000 ? `${Math.ceil(droneRemainingMs / 3_600_000)}h` : formatCountdownMs(droneRemainingMs)}`
@@ -833,6 +912,29 @@ export function FarmMeadow({
                 </span>
               </motion.button>
             </div>
+
+            {surgeStatus.isActive && onOpenReinvest && (
+              <div className="flex items-center justify-start">
+                <motion.button
+                  key={`reinvest-surge-chip-${entranceEpoch}`}
+                  type="button"
+                  onClick={onOpenReinvest}
+                  aria-label={`Open Reinvest modal for +${surgeStatus.bonusPercent}% ${surgeStatus.label}`}
+                  initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: -6, scale: 0.95 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  whileHover={!prefersReducedMotion ? { y: -1, scale: 1.02 } : undefined}
+                  whileTap={!prefersReducedMotion ? { scale: 0.96 } : undefined}
+                  transition={{ ...cardTransition, delay: 0.12 }}
+                  className="clay-btn clay-btn-emerald pointer-events-auto min-h-[44px] px-3 py-1.5 rounded-2xl text-[11px] font-extrabold inline-flex items-center gap-1.5"
+                >
+                  <RefreshCw className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate max-w-[140px]">+{surgeStatus.bonusPercent}% Reinvest Surge</span>
+                  <span className="font-mono-num tabular-nums px-1.5 py-0.5 rounded-md bg-white/25 text-white">
+                    {formatCountdownMs(surgeStatus.remainingMs)}
+                  </span>
+                </motion.button>
+              </div>
+            )}
           </motion.div>
         )}
       </AnimatePresence>
@@ -1052,15 +1154,26 @@ export function FarmMeadow({
 
             <AnimatePresence>
               {collectRippleSeq > 0 && !prefersReducedMotion && (
-                <motion.span
-                  key={`collect-ripple-${collectRippleSeq}`}
-                  aria-hidden="true"
-                  initial={{ opacity: 0.72, scale: 0.92 }}
-                  animate={{ opacity: 0, scale: 1.3 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-                  className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-300 shadow-[0_0_20px_rgba(251,191,36,0.65)]"
-                />
+                <>
+                  <motion.span
+                    key={`collect-ripple-inner-${collectRippleSeq}`}
+                    aria-hidden="true"
+                    initial={{ opacity: 0.8, scale: 0.92 }}
+                    animate={{ opacity: 0, scale: 1.32 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.46, ease: [0.16, 1, 0.3, 1] }}
+                    className="pointer-events-none absolute inset-0 rounded-2xl border-2 border-amber-300 shadow-[0_0_22px_rgba(251,191,36,0.75)]"
+                  />
+                  <motion.span
+                    key={`collect-ripple-outer-${collectRippleSeq}`}
+                    aria-hidden="true"
+                    initial={{ opacity: 0.55, scale: 0.96 }}
+                    animate={{ opacity: 0, scale: 1.56 }}
+                    exit={{ opacity: 0 }}
+                    transition={{ duration: 0.62, delay: 0.06, ease: [0.16, 1, 0.3, 1] }}
+                    className="pointer-events-none absolute inset-0 rounded-2xl border border-yellow-200/80"
+                  />
+                </>
               )}
             </AnimatePresence>
 
@@ -1087,13 +1200,7 @@ export function FarmMeadow({
               whileTap={pendingEggs > 0 && !prefersReducedMotion ? { scale: 0.94 } : undefined}
               onClick={() => {
                 if (pendingEggs > 0) {
-                  const nextSeq = ++harvestSeqRef.current;
-                  setHarvestBurst({ seq: nextSeq, amount: pendingEggs });
-                  if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
-                  harvestTimerRef.current = window.setTimeout(() => {
-                    setHarvestBurst((cur) => (cur?.seq === nextSeq ? null : cur));
-                  }, 1350);
-                  triggerCollectEffects();
+                  triggerCollectPressFeedback();
                 }
                 onCollect();
               }}
@@ -1133,33 +1240,95 @@ export function FarmMeadow({
             aria-hidden="true"
             className="pointer-events-none fixed inset-0 z-[70] overflow-hidden"
           >
-            {flyingEggs.map((particle) => (
-              <motion.div
-                key={particle.id}
-                initial={{
-                  x: particle.startX - 14,
-                  y: particle.startY - 14,
-                  scale: 0.45,
-                  opacity: 0,
-                  rotate: 0,
-                }}
-                animate={{
-                  x: [particle.startX - 14, particle.midX - 14, particle.endX - 14],
-                  y: [particle.startY - 14, particle.midY - 14, particle.endY - 14],
-                  scale: [0.5, 1.25, 0.95, 0.42],
-                  opacity: [0, 1, 1, 0.15],
-                  rotate: [0, particle.rotateDeg, particle.rotateDeg * 0.4, 0],
-                }}
-                transition={{
-                  duration: particle.duration,
-                  delay: particle.delay,
-                  ease: [0.22, 1, 0.36, 1],
-                }}
-                className="absolute top-0 left-0 w-7 h-7 flex items-center justify-center will-change-transform drop-shadow-[0_4px_10px_rgba(245,158,11,0.55)]"
-              >
-                <EggIcon className="w-7 h-7" />
-              </motion.div>
-            ))}
+            {flyingEggs.map((particle) => {
+              const xSteps = particle.xs.map((x) => x - 16);
+              const ySteps = particle.ys.map((y) => y - 16);
+              const scaleSteps = particle.xs.map((_, i) => {
+                const progress = i / Math.max(1, particle.xs.length - 1);
+                if (progress === 0) return 0.55;
+                if (progress < 0.45) return 1.28;
+                if (progress < 0.85) return 1.02;
+                return 0.42;
+              });
+              const opacitySteps = particle.xs.map((_, i) => {
+                const progress = i / Math.max(1, particle.xs.length - 1);
+                if (progress === 0) return 0.15;
+                if (progress < 0.88) return 1;
+                return 0.2;
+              });
+              const rotateSteps = particle.xs.map((_, i) => {
+                const progress = i / Math.max(1, particle.xs.length - 1);
+                return Math.sin(progress * Math.PI) * particle.rotateDeg;
+              });
+              const trailXSteps = particle.xs.map((x) => x - 6);
+              const trailYSteps = particle.ys.map((y) => y - 6);
+
+              return (
+                <div key={particle.id}>
+                  {/* Trailing Golden Stardust Sparkle */}
+                  <motion.div
+                    initial={{
+                      x: trailXSteps[0],
+                      y: trailYSteps[0],
+                      scale: 0.4,
+                      opacity: 0,
+                    }}
+                    animate={{
+                      x: trailXSteps,
+                      y: trailYSteps,
+                      scale: [0.4, 1.1, 0.8, 0.2],
+                      opacity: [0, 0.85, 0.65, 0],
+                    }}
+                    transition={{
+                      duration: particle.duration,
+                      delay: particle.delay + 0.045,
+                      ease: 'linear',
+                    }}
+                    className={`absolute top-0 left-0 w-3 h-3 rounded-full will-change-transform blur-[1px] ${
+                      particle.isGolden
+                        ? 'bg-amber-300 shadow-[0_0_12px_rgba(251,191,36,0.95)]'
+                        : 'bg-yellow-200 shadow-[0_0_10px_rgba(253,224,71,0.85)]'
+                    }`}
+                  />
+                  {/* Primary Flying Egg with Warm Glow */}
+                  <motion.div
+                    initial={{
+                      x: xSteps[0],
+                      y: ySteps[0],
+                      scale: 0.5,
+                      opacity: 0,
+                      rotate: 0,
+                    }}
+                    animate={{
+                      x: xSteps,
+                      y: ySteps,
+                      scale: scaleSteps,
+                      opacity: opacitySteps,
+                      rotate: rotateSteps,
+                    }}
+                    transition={{
+                      duration: particle.duration,
+                      delay: particle.delay,
+                      ease: 'linear',
+                    }}
+                    className="absolute top-0 left-0 w-8 h-8 flex items-center justify-center will-change-transform"
+                  >
+                    <span
+                      className={`absolute inset-0 rounded-full blur-sm ${
+                        particle.isGolden ? 'bg-amber-400/65' : 'bg-yellow-300/45'
+                      }`}
+                    />
+                    <EggIcon
+                      className={`relative w-7 h-7 ${
+                        particle.isGolden
+                          ? 'drop-shadow-[0_0_12px_rgba(251,191,36,0.95)]'
+                          : 'drop-shadow-[0_4px_10px_rgba(245,158,11,0.65)]'
+                      }`}
+                    />
+                  </motion.div>
+                </div>
+              );
+            })}
           </div>,
           document.body,
         )}

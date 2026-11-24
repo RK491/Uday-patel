@@ -93,6 +93,7 @@ import {
   DEFAULT_ECONOMY_CONFIG,
   DEFAULT_GET_CODE_CHANNEL_URL,
   DEFAULT_MAINTENANCE_CONFIG,
+  DEFAULT_REINVEST_SURGE,
   DEFAULT_TASK_PRICING_CONFIG,
   DEFAULT_WITHDRAW_APPROVE_TEMPLATE,
   extractTelegramNumericUserId,
@@ -100,6 +101,7 @@ import {
   formatAdConfigTemplate,
   formatPromoRewardSummary,
   generateGiftCodeString,
+  getActiveReinvestSurgeStatus,
   getEffectiveAdminIds,
   getTaskChannelCheckMode,
   getUnifiedUserId,
@@ -114,8 +116,11 @@ import {
   normalizeTelegramChannelEntry,
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
+  REINVEST_SURGE_MAX_BONUS_PERCENT,
+  REINVEST_SURGE_MIN_BONUS_PERCENT,
   renderWithdrawApproveMessage,
   resolveEconomyConfig,
+  resolveReinvestSurge,
   resolveTaskPricingConfig,
   sanitizeExternalUrl,
 } from '../game/economy';
@@ -619,7 +624,7 @@ export function AdminPanelView({
     setTaskFeePercentDraft(String(Math.round(resolvedTaskPricing.platformFeeRate * 100)));
   }, [resolvedTaskPricing]);
 
-  // Economy Settings (Min. Withdraw & Per-Refer Reward)
+  // Economy Settings (Min. Withdraw, Per-Refer Reward & Reinvest Surge Windows)
   const resolvedEconomy = useMemo(
     () => resolveEconomyConfig(economyConfig),
     [economyConfig],
@@ -630,6 +635,23 @@ export function AdminPanelView({
   const [perReferRewardDraft, setPerReferRewardDraft] = useState(
     String(resolvedEconomy.perReferRewardCoins),
   );
+  const [surgeEnabledDraft, setSurgeEnabledDraft] = useState<boolean>(
+    Boolean(resolvedEconomy.reinvestSurge?.enabled),
+  );
+  const [surgeBonusPercentDraft, setSurgeBonusPercentDraft] = useState<string>(
+    String(resolvedEconomy.reinvestSurge?.bonusPercent ?? DEFAULT_REINVEST_SURGE.bonusPercent),
+  );
+  const [surgeLabelDraft, setSurgeLabelDraft] = useState<string>(
+    resolvedEconomy.reinvestSurge?.label ?? DEFAULT_REINVEST_SURGE.label ?? 'Flash Reinvest Surge',
+  );
+  const [surgeStartsAtMsDraft, setSurgeStartsAtMsDraft] = useState<number>(
+    resolvedEconomy.reinvestSurge?.startsAtMs ?? 0,
+  );
+  const [surgeEndsAtMsDraft, setSurgeEndsAtMsDraft] = useState<number>(
+    resolvedEconomy.reinvestSurge?.endsAtMs ?? 0,
+  );
+  const [surgeDurationHoursDraft, setSurgeDurationHoursDraft] = useState<string>('6');
+  const [adminSurgeNowMs, setAdminSurgeNowMs] = useState<number>(() => Date.now());
   const [savingEconomy, setSavingEconomy] = useState(false);
   const [economyFeedback, setEconomyFeedback] = useState<{
     ok: boolean;
@@ -639,7 +661,49 @@ export function AdminPanelView({
   useEffect(() => {
     setMinWithdrawEggsDraft(String(resolvedEconomy.minWithdrawEggs));
     setPerReferRewardDraft(String(resolvedEconomy.perReferRewardCoins));
+    if (resolvedEconomy.reinvestSurge) {
+      setSurgeEnabledDraft(Boolean(resolvedEconomy.reinvestSurge.enabled));
+      setSurgeBonusPercentDraft(String(resolvedEconomy.reinvestSurge.bonusPercent));
+      setSurgeLabelDraft(
+        resolvedEconomy.reinvestSurge.label ?? DEFAULT_REINVEST_SURGE.label ?? 'Flash Reinvest Surge',
+      );
+      setSurgeStartsAtMsDraft(resolvedEconomy.reinvestSurge.startsAtMs);
+      setSurgeEndsAtMsDraft(resolvedEconomy.reinvestSurge.endsAtMs);
+    }
   }, [resolvedEconomy]);
+
+  useEffect(() => {
+    if (!surgeEnabledDraft && !resolvedEconomy.reinvestSurge?.enabled) return;
+    setAdminSurgeNowMs(Date.now());
+    const id = window.setInterval(() => setAdminSurgeNowMs(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [surgeEnabledDraft, resolvedEconomy.reinvestSurge?.enabled]);
+
+  const buildCurrentDraftEconomyPayload = (overrideSurge?: {
+    enabled: boolean;
+    bonusPercent: number;
+    startsAtMs: number;
+    endsAtMs: number;
+    label?: string;
+  }) => {
+    const surgeInput =
+      overrideSurge ??
+      (surgeEnabledDraft || resolvedEconomy.reinvestSurge
+        ? {
+            enabled: surgeEnabledDraft,
+            bonusPercent: Number(surgeBonusPercentDraft),
+            startsAtMs: surgeStartsAtMsDraft,
+            endsAtMs: surgeEndsAtMsDraft,
+            label: surgeLabelDraft,
+          }
+        : undefined);
+    const normalized = resolveEconomyConfig({
+      minWithdrawEggs: Number(minWithdrawEggsDraft),
+      perReferRewardCoins: Number(perReferRewardDraft),
+      ...(surgeInput ? { reinvestSurge: resolveReinvestSurge(surgeInput) } : {}),
+    });
+    return normalized;
+  };
 
   const handleSaveEconomySubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -649,20 +713,27 @@ export function AdminPanelView({
     setSavingEconomy(true);
     setEconomyFeedback(null);
     try {
-      const normalized = resolveEconomyConfig({
-        minWithdrawEggs: Number(minWithdrawEggsDraft),
-        perReferRewardCoins: Number(perReferRewardDraft),
-      });
+      const normalized = buildCurrentDraftEconomyPayload();
       const ok = await onSaveEconomyConfig({
         minWithdrawEggs: normalized.minWithdrawEggs,
         perReferRewardCoins: normalized.perReferRewardCoins,
+        ...(normalized.reinvestSurge ? { reinvestSurge: normalized.reinvestSurge } : {}),
       });
       if (ok !== false) {
         setMinWithdrawEggsDraft(String(normalized.minWithdrawEggs));
         setPerReferRewardDraft(String(normalized.perReferRewardCoins));
+        if (normalized.reinvestSurge) {
+          setSurgeEnabledDraft(normalized.reinvestSurge.enabled);
+          setSurgeBonusPercentDraft(String(normalized.reinvestSurge.bonusPercent));
+          setSurgeStartsAtMsDraft(normalized.reinvestSurge.startsAtMs);
+          setSurgeEndsAtMsDraft(normalized.reinvestSurge.endsAtMs);
+        }
+        const liveSurge = getActiveReinvestSurgeStatus(normalized, Date.now());
         setEconomyFeedback({
           ok: true,
-          text: `Saved live! Min Withdraw: ${normalized.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${normalized.perReferRewardCoins.toLocaleString()} coins.`,
+          text: `Saved live! Min Withdraw: ${normalized.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${normalized.perReferRewardCoins.toLocaleString()} coins${
+            liveSurge.isActive ? ` · Surge +${liveSurge.bonusPercent}% LIVE` : ''
+          }.`,
         });
       } else {
         setEconomyFeedback({
@@ -674,6 +745,106 @@ export function AdminPanelView({
       setEconomyFeedback({
         ok: false,
         text: err instanceof Error ? err.message : 'Failed to save economy settings.',
+      });
+    } finally {
+      setSavingEconomy(false);
+    }
+  };
+
+  const handleLaunchReinvestSurge = async (bonusPercent: number, durationHours: number) => {
+    if (!requireStrictAdminAuth('launching a Reinvest Surge window')) return;
+    if (!onSaveEconomyConfig || savingEconomy) return;
+    onTabTap?.();
+    const safePct = Math.max(
+      REINVEST_SURGE_MIN_BONUS_PERCENT,
+      Math.min(REINVEST_SURGE_MAX_BONUS_PERCENT, Math.round(bonusPercent) || 15),
+    );
+    const safeHours = Math.max(0.25, Math.min(168, Number(durationHours) || 6));
+    const startsAtMs = Date.now();
+    const endsAtMs = startsAtMs + Math.round(safeHours * 60 * 60 * 1000);
+    const cleanLabel =
+      surgeLabelDraft.trim().slice(0, 48) || DEFAULT_REINVEST_SURGE.label || 'Flash Reinvest Surge';
+
+    setSavingEconomy(true);
+    setEconomyFeedback(null);
+    try {
+      const normalized = buildCurrentDraftEconomyPayload({
+        enabled: true,
+        bonusPercent: safePct,
+        startsAtMs,
+        endsAtMs,
+        label: cleanLabel,
+      });
+      const ok = await onSaveEconomyConfig({
+        minWithdrawEggs: normalized.minWithdrawEggs,
+        perReferRewardCoins: normalized.perReferRewardCoins,
+        ...(normalized.reinvestSurge ? { reinvestSurge: normalized.reinvestSurge } : {}),
+      });
+      if (ok !== false && normalized.reinvestSurge) {
+        setSurgeEnabledDraft(true);
+        setSurgeBonusPercentDraft(String(normalized.reinvestSurge.bonusPercent));
+        setSurgeDurationHoursDraft(String(safeHours));
+        setSurgeLabelDraft(normalized.reinvestSurge.label ?? cleanLabel);
+        setSurgeStartsAtMsDraft(normalized.reinvestSurge.startsAtMs);
+        setSurgeEndsAtMsDraft(normalized.reinvestSurge.endsAtMs);
+        setAdminSurgeNowMs(startsAtMs);
+        setEconomyFeedback({
+          ok: true,
+          text: `Reinvest Surge LIVE! +${normalized.reinvestSurge.bonusPercent}% Coins bonus for ${safeHours}h across Farm, Wallet & Tasks.`,
+        });
+      } else {
+        setEconomyFeedback({
+          ok: false,
+          text: 'Could not launch Reinvest Surge. Check permissions or connection.',
+        });
+      }
+    } catch (err) {
+      setEconomyFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to launch Reinvest Surge.',
+      });
+    } finally {
+      setSavingEconomy(false);
+    }
+  };
+
+  const handleEndReinvestSurge = async () => {
+    if (!requireStrictAdminAuth('ending Reinvest Surge window')) return;
+    if (!onSaveEconomyConfig || savingEconomy) return;
+    onTabTap?.();
+    const now = Date.now();
+    setSavingEconomy(true);
+    setEconomyFeedback(null);
+    try {
+      const normalized = buildCurrentDraftEconomyPayload({
+        enabled: false,
+        bonusPercent: Number(surgeBonusPercentDraft) || DEFAULT_REINVEST_SURGE.bonusPercent,
+        startsAtMs: surgeStartsAtMsDraft,
+        endsAtMs: now,
+        label: surgeLabelDraft,
+      });
+      const ok = await onSaveEconomyConfig({
+        minWithdrawEggs: normalized.minWithdrawEggs,
+        perReferRewardCoins: normalized.perReferRewardCoins,
+        ...(normalized.reinvestSurge ? { reinvestSurge: normalized.reinvestSurge } : {}),
+      });
+      if (ok !== false) {
+        setSurgeEnabledDraft(false);
+        setSurgeEndsAtMsDraft(now);
+        setEconomyFeedback({
+          ok: true,
+          text: 'Reinvest Surge ended. Rate reverted to standard +5% extra.',
+        });
+      } else {
+        setEconomyFeedback({
+          ok: false,
+          text: 'Could not end Reinvest Surge. Check connection.',
+        });
+      }
+    } catch (err) {
+      setEconomyFeedback({
+        ok: false,
+        text: err instanceof Error ? err.message : 'Failed to end Reinvest Surge.',
       });
     } finally {
       setSavingEconomy(false);
@@ -2368,16 +2539,25 @@ export function AdminPanelView({
 
   const renderEconomySettingsCard = () => {
     if (!onSaveEconomyConfig) return null;
+    const liveSurgeStatus = getActiveReinvestSurgeStatus(resolvedEconomy, adminSurgeNowMs);
+    const formatAdminSurgeCountdown = (ms: number) => {
+      const totalSec = Math.max(0, Math.floor(ms / 1000));
+      const h = Math.floor(totalSec / 3600);
+      const m = Math.floor((totalSec % 3600) / 60);
+      const s = totalSec % 60;
+      return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    };
+
     return (
       <form onSubmit={(e) => void handleSaveEconomySubmit(e)} className="clay-card p-4 space-y-3">
         <div className="flex items-start justify-between gap-2 flex-wrap">
           <div>
             <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 flex items-center gap-2">
               <Coins className="w-4 h-4 text-amber-500" />
-              <span>Min. Withdraw &amp; Per-Refer Reward</span>
+              <span>Min. Withdraw, Refer Reward &amp; Reinvest Surge</span>
             </h2>
             <p className="text-xs text-stone-500 dark:text-stone-400 mt-0.5">
-              Live values applied immediately to Withdrawals and Referral rewards across the app.
+              Live values applied immediately to Withdrawals, Referrals, and Timed Reinvest Surge Windows.
             </p>
           </div>
           <button
@@ -2495,6 +2675,141 @@ export function AdminPanelView({
           </div>
         </div>
 
+        {/* Reinvest Surge Window Control */}
+        <div className="clay-card-warm !rounded-2xl p-3.5 space-y-3 border border-amber-300/75 dark:border-amber-700/50">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 min-w-0">
+              <Flame className="w-4 h-4 text-orange-500 fill-orange-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-extrabold text-stone-900 dark:text-stone-100">
+                  Reinvest Surge Window
+                </div>
+                <div className="text-[10px] font-semibold text-stone-600 dark:text-stone-300">
+                  Boosts Eggs → Coins bonus above standard +5% ({REINVEST_SURGE_MIN_BONUS_PERCENT}%–{REINVEST_SURGE_MAX_BONUS_PERCENT}%)
+                </div>
+              </div>
+            </div>
+            {liveSurgeStatus.isActive ? (
+              <span className="font-mono-num tabular-nums rounded-lg bg-emerald-600 text-white px-2.5 py-1 text-[11px] font-extrabold shrink-0">
+                LIVE +{liveSurgeStatus.bonusPercent}% · {formatAdminSurgeCountdown(liveSurgeStatus.remainingMs)}
+              </span>
+            ) : (
+              <span className="rounded-lg bg-stone-200/80 dark:bg-stone-800 text-stone-700 dark:text-stone-300 px-2.5 py-1 text-[11px] font-bold shrink-0">
+                Standard +5%
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {[
+              { pct: 10, hrs: 2, label: '+10% · 2h' },
+              { pct: 15, hrs: 6, label: '+15% · 6h' },
+              { pct: 20, hrs: 12, label: '+20% · 12h' },
+              { pct: 25, hrs: 24, label: '+25% · 24h' },
+            ].map((preset) => (
+              <button
+                key={`surge_${preset.pct}_${preset.hrs}`}
+                type="button"
+                disabled={savingEconomy}
+                onClick={() => void handleLaunchReinvestSurge(preset.pct, preset.hrs)}
+                className="clay-btn clay-btn-emerald disabled:opacity-50 px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold font-mono-num"
+              >
+                {preset.label}
+              </button>
+            ))}
+            {liveSurgeStatus.isActive && (
+              <button
+                type="button"
+                disabled={savingEconomy}
+                onClick={() => void handleEndReinvestSurge()}
+                className="clay-btn clay-btn-neutral disabled:opacity-50 ml-auto px-2.5 py-1.5 rounded-xl text-[11px] font-extrabold text-rose-700 dark:text-rose-300"
+              >
+                End Surge Now
+              </button>
+            )}
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div>
+              <label
+                htmlFor="admin-surge-label"
+                className="block text-[10px] font-extrabold text-stone-700 dark:text-stone-300 mb-1"
+              >
+                Banner Label
+              </label>
+              <input
+                id="admin-surge-label"
+                type="text"
+                maxLength={48}
+                value={surgeLabelDraft}
+                onChange={(e) => {
+                  setSurgeLabelDraft(e.target.value);
+                  setEconomyFeedback(null);
+                }}
+                placeholder="Flash Reinvest Surge"
+                className="clay-card !rounded-xl w-full min-h-[38px] px-2.5 text-xs font-bold text-stone-900 dark:text-stone-100"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="admin-surge-bonus-pct"
+                className="block text-[10px] font-extrabold text-stone-700 dark:text-stone-300 mb-1"
+              >
+                Total Bonus ({REINVEST_SURGE_MIN_BONUS_PERCENT}–{REINVEST_SURGE_MAX_BONUS_PERCENT}%)
+              </label>
+              <input
+                id="admin-surge-bonus-pct"
+                type="number"
+                min={REINVEST_SURGE_MIN_BONUS_PERCENT}
+                max={REINVEST_SURGE_MAX_BONUS_PERCENT}
+                step={1}
+                value={surgeBonusPercentDraft}
+                onChange={(e) => {
+                  setSurgeBonusPercentDraft(e.target.value);
+                  setEconomyFeedback(null);
+                }}
+                className="clay-card !rounded-xl w-full min-h-[38px] px-2.5 text-xs font-mono-num font-extrabold text-stone-900 dark:text-stone-100"
+              />
+            </div>
+            <div>
+              <label
+                htmlFor="admin-surge-duration-hours"
+                className="block text-[10px] font-extrabold text-stone-700 dark:text-stone-300 mb-1"
+              >
+                Duration (Hours)
+              </label>
+              <div className="flex gap-1.5">
+                <input
+                  id="admin-surge-duration-hours"
+                  type="number"
+                  min={0.5}
+                  max={168}
+                  step={0.5}
+                  value={surgeDurationHoursDraft}
+                  onChange={(e) => {
+                    setSurgeDurationHoursDraft(e.target.value);
+                    setEconomyFeedback(null);
+                  }}
+                  className="clay-card !rounded-xl flex-1 min-w-0 min-h-[38px] px-2.5 text-xs font-mono-num font-extrabold text-stone-900 dark:text-stone-100"
+                />
+                <button
+                  type="button"
+                  disabled={savingEconomy}
+                  onClick={() =>
+                    void handleLaunchReinvestSurge(
+                      Number(surgeBonusPercentDraft),
+                      Number(surgeDurationHoursDraft),
+                    )
+                  }
+                  className="clay-btn clay-btn-amber disabled:opacity-50 px-3 min-h-[38px] rounded-xl text-[11px] font-extrabold shrink-0"
+                >
+                  Launch
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
         {economyFeedback && (
           <div
             role="status"
@@ -2521,7 +2836,7 @@ export function AdminPanelView({
           ) : (
             <>
               <Check className="w-3.5 h-3.5" />
-              <span>Save Min. Withdraw &amp; Refer Reward</span>
+              <span>Save Economy &amp; Surge Settings</span>
             </>
           )}
         </button>

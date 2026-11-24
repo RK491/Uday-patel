@@ -103,6 +103,8 @@ import {
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+let firebaseHostingProjectId = '';
+
 function initServerFirestore(): Firestore | null {
   try {
     const candidates = [
@@ -114,6 +116,7 @@ function initServerFirestore(): Firestore | null {
     if (!configPath) return null;
     const raw = fs.readFileSync(configPath, 'utf8');
     const cfg = JSON.parse(raw) as Record<string, string>;
+    firebaseHostingProjectId = String(cfg.projectId || '').trim().toLowerCase();
     const app = initializeApp(cfg, 'chickenland-server');
     return getFirestore(app, cfg.firestoreDatabaseId);
   } catch {
@@ -4201,6 +4204,14 @@ async function startServer() {
       ) {
         return true;
       }
+      if (
+        firebaseHostingProjectId &&
+        originUrl.protocol === 'https:' &&
+        (hostname === `${firebaseHostingProjectId}.web.app` ||
+          hostname === `${firebaseHostingProjectId}.firebaseapp.com`)
+      ) {
+        return true;
+      }
       const configuredWebUrls = [
         process.env.APP_URL || '',
         process.env.SHARED_APP_URL || '',
@@ -4654,6 +4665,7 @@ async function startServer() {
       initData?: string;
       minWithdrawEggs?: number;
       perReferRewardCoins?: number;
+      reinvestSurge?: EconomyConfig['reinvestSurge'];
     };
     const firestoreAdminIds = await loadExtraAdminIdsFromFirestore();
     const effectiveExtraAdmins = [...ADMIN_TELEGRAM_IDS, ...firestoreAdminIds];
@@ -4677,15 +4689,23 @@ async function startServer() {
       res.status(400).json({ ok: false, error: 'Per-refer reward must be between 0 and 100,000 coins.' });
       return;
     }
+    const prevEconomy = await loadEconomyConfig();
+    const nextReinvestSurge =
+      body.reinvestSurge && typeof body.reinvestSurge === 'object'
+        ? body.reinvestSurge
+        : prevEconomy.reinvestSurge;
     const saved = await saveEconomyConfigOnServer({
       minWithdrawEggs: minW,
       perReferRewardCoins: perRef,
+      ...(nextReinvestSurge ? { reinvestSurge: nextReinvestSurge } : {}),
     });
     recordServerLog(
       'info',
       'economy_config',
       `Economy settings updated by ${resolvedPlayerId}`,
-      `minWithdrawEggs=${saved.minWithdrawEggs}, perReferRewardCoins=${saved.perReferRewardCoins}`,
+      `minWithdrawEggs=${saved.minWithdrawEggs}, perReferRewardCoins=${saved.perReferRewardCoins}, surge=${
+        saved.reinvestSurge?.enabled ? `${saved.reinvestSurge.bonusPercent}%` : 'off'
+      }`,
     );
     res.json({ ok: true, economy: saved });
   });
@@ -5191,14 +5211,28 @@ async function startServer() {
       return;
     }
 
+    const rawInitData = String(body.initData || req.headers['x-telegram-init-data'] || '').trim();
     const verifiedActor = resolveVerifiedPlayerActor({
       req,
       token: body.token,
-      initData: String(body.initData || '').trim(),
+      initData: rawInitData,
     });
-    const numericUserId =
-      extractTelegramNumericUserId(verifiedActor) ||
-      extractTelegramNumericUserId(String(body.playerId || '').trim());
+    let numericUserId = verifiedActor ? extractTelegramNumericUserId(verifiedActor) : null;
+    if (!numericUserId && rawInitData) {
+      try {
+        const initParams = new URLSearchParams(rawInitData);
+        const userJson = initParams.get('user');
+        if (userJson) {
+          const parsedUser = JSON.parse(userJson) as { id?: number | string };
+          numericUserId = extractTelegramNumericUserId(parsedUser?.id);
+        }
+      } catch {
+        // Ignore malformed initData user JSON
+      }
+    }
+    if (!numericUserId) {
+      numericUserId = extractTelegramNumericUserId(String(body.playerId || '').trim());
+    }
     if (!numericUserId) {
       res.json({
         ok: true,
@@ -8459,7 +8493,13 @@ async function startServer() {
     res.status(404).json({ ok: false, error: 'API route not found' });
   });
 
-  if (process.env.NODE_ENV !== 'production') {
+  const distDir = path.resolve(__dirname, 'dist');
+  const distIndexExists = fs.existsSync(path.join(distDir, 'index.html'));
+  const runningUnderTsx = process.execArgv.some((arg) => arg.includes('tsx'));
+  const useProductionStatic =
+    process.env.NODE_ENV === 'production' || (distIndexExists && !runningUnderTsx);
+
+  if (!useProductionStatic) {
     const httpServer = http.createServer(app);
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
@@ -8475,7 +8515,6 @@ async function startServer() {
       console.log(`Alpha Gram server running on http://0.0.0.0:${PORT}`);
     });
   } else {
-    const distDir = path.resolve(__dirname, 'dist');
     app.use(
       express.static(distDir, {
         setHeaders: (res, filePath) => {

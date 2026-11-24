@@ -1,4 +1,6 @@
 import type {
+  AchievementIconKey,
+  AchievementTier,
   AdConfig,
   AdGateActionType,
   AdNetworkId,
@@ -19,8 +21,10 @@ import type {
   MaintenanceConfig,
   PromoRewardType,
   ReferralRecord,
+  ReinvestSurgeConfig,
   RequiredTelegramChannel,
   SeasonConfig,
+  ShowcaseBadge,
   TaskCategory,
   TaskDefinition,
   TaskPricingConfig,
@@ -56,17 +60,52 @@ export const REFERRAL_DEPOSIT_COMMISSION_RATE = 0.05;
 export const REFERRER_LIFETIME_EGG_COMMISSION_RATE = 0;
 export const REFERRED_WELCOME_BONUS_COINS = 0;
 
+export const REINVEST_SURGE_MIN_BONUS_PERCENT = 6;
+export const REINVEST_SURGE_MAX_BONUS_PERCENT = 50;
+
+export const DEFAULT_REINVEST_SURGE: ReinvestSurgeConfig = {
+  enabled: false,
+  bonusPercent: 15,
+  startsAtMs: 0,
+  endsAtMs: 0,
+  label: 'Flash Reinvest Surge',
+};
+
 export const DEFAULT_ECONOMY_CONFIG: EconomyConfig = {
   minWithdrawEggs: MIN_WITHDRAW_EGGS,
   perReferRewardCoins: REFERRER_SIGNUP_BONUS_COINS,
   updatedAtMs: 0,
 };
 
+export function resolveReinvestSurge(
+  raw?: Partial<ReinvestSurgeConfig> | null,
+): ReinvestSurgeConfig | undefined {
+  if (!raw || typeof raw !== 'object') return undefined;
+  const pctRaw = Math.round(Number(raw.bonusPercent ?? DEFAULT_REINVEST_SURGE.bonusPercent));
+  const bonusPercent = Number.isFinite(pctRaw)
+    ? Math.max(REINVEST_SURGE_MIN_BONUS_PERCENT, Math.min(REINVEST_SURGE_MAX_BONUS_PERCENT, pctRaw))
+    : DEFAULT_REINVEST_SURGE.bonusPercent;
+  const startsAtMs = Math.max(0, Math.floor(Number(raw.startsAtMs ?? 0) || 0));
+  const rawEnds = Math.max(0, Math.floor(Number(raw.endsAtMs ?? 0) || 0));
+  const endsAtMs = rawEnds >= startsAtMs ? rawEnds : startsAtMs;
+  const cleanLabel = String(raw.label ?? '')
+    .trim()
+    .slice(0, 48);
+  return {
+    enabled: Boolean(raw.enabled),
+    bonusPercent,
+    startsAtMs,
+    endsAtMs,
+    ...(cleanLabel ? { label: cleanLabel } : {}),
+  };
+}
+
 export function resolveEconomyConfig(
   raw?: Partial<EconomyConfig> | null,
 ): EconomyConfig {
   const minW = Math.round(Number(raw?.minWithdrawEggs));
   const perRef = Math.round(Number(raw?.perReferRewardCoins));
+  const surge = resolveReinvestSurge(raw?.reinvestSurge);
   return {
     minWithdrawEggs:
       Number.isFinite(minW) && minW >= 1 && minW <= 1_000_000
@@ -76,7 +115,60 @@ export function resolveEconomyConfig(
       Number.isFinite(perRef) && perRef >= 0 && perRef <= 100_000
         ? perRef
         : DEFAULT_ECONOMY_CONFIG.perReferRewardCoins,
+    ...(surge ? { reinvestSurge: surge } : {}),
     updatedAtMs: Math.max(0, Math.floor(Number(raw?.updatedAtMs ?? 0) || 0)),
+  };
+}
+
+export interface ReinvestSurgeStatus {
+  isActive: boolean;
+  isScheduled: boolean;
+  bonusPercent: number;
+  bonusRate: number;
+  extraBoostPercent: number;
+  remainingMs: number;
+  startsInMs: number;
+  startsAtMs: number;
+  endsAtMs: number;
+  label: string;
+}
+
+export function getActiveReinvestSurgeStatus(
+  economy?: Partial<EconomyConfig> | null,
+  nowMs = Date.now(),
+): ReinvestSurgeStatus {
+  const basePercent = Math.round(REINVEST_BONUS_RATE * 100);
+  const surge = resolveReinvestSurge(economy?.reinvestSurge);
+  if (!surge || !surge.enabled || surge.endsAtMs <= surge.startsAtMs) {
+    return {
+      isActive: false,
+      isScheduled: false,
+      bonusPercent: basePercent,
+      bonusRate: REINVEST_BONUS_RATE,
+      extraBoostPercent: 0,
+      remainingMs: 0,
+      startsInMs: 0,
+      startsAtMs: 0,
+      endsAtMs: 0,
+      label: DEFAULT_REINVEST_SURGE.label || 'Flash Reinvest Surge',
+    };
+  }
+  const safeNow = Math.max(0, Number.isFinite(nowMs) ? nowMs : Date.now());
+  const isActive = safeNow >= surge.startsAtMs && safeNow < surge.endsAtMs;
+  const isScheduled = !isActive && safeNow < surge.startsAtMs && surge.endsAtMs > surge.startsAtMs;
+  const bonusPercent = isActive ? surge.bonusPercent : basePercent;
+  const bonusRate = isActive ? surge.bonusPercent / 100 : REINVEST_BONUS_RATE;
+  return {
+    isActive,
+    isScheduled,
+    bonusPercent,
+    bonusRate,
+    extraBoostPercent: isActive ? Math.max(0, surge.bonusPercent - basePercent) : 0,
+    remainingMs: isActive ? Math.max(0, surge.endsAtMs - safeNow) : 0,
+    startsInMs: isScheduled ? Math.max(0, surge.startsAtMs - safeNow) : 0,
+    startsAtMs: surge.startsAtMs,
+    endsAtMs: surge.endsAtMs,
+    label: surge.label || DEFAULT_REINVEST_SURGE.label || 'Flash Reinvest Surge',
   };
 }
 
@@ -823,7 +915,12 @@ export function calculateProductionRate(
     UserFarmProfile,
     'leghornCount' | 'rhodeCount' | 'orpingtonCount' | 'australorpCount'
   > &
-    Partial<Pick<UserFarmProfile, 'level' | 'feedBoostUntilMs' | 'coopFeverUntilMs'>>,
+    Partial<
+      Pick<
+        UserFarmProfile,
+        'level' | 'feedBoostUntilMs' | 'coopFeverUntilMs' | 'claimedAchievementIds'
+      >
+    >,
   nowMs?: number,
 ): number {
   const baseRate =
@@ -833,6 +930,7 @@ export function calculateProductionRate(
     profile.australorpCount * 225;
 
   const levelMult = calculateLevelYieldMultiplier(profile.level ?? 1);
+  const achMult = calculateAchievementPerks(profile).yieldMultiplier;
   const feedMult =
     nowMs !== undefined && isFeedBoosterActive({ feedBoostUntilMs: profile.feedBoostUntilMs }, nowMs)
       ? 2
@@ -842,7 +940,7 @@ export function calculateProductionRate(
       ? COOP_FEVER_MULTIPLIER
       : 1;
 
-  return Math.round(baseRate * levelMult * feedMult * coopMult);
+  return Math.round(baseRate * levelMult * achMult * feedMult * coopMult);
 }
 
 export function calculateTotalChickens(
@@ -1237,12 +1335,24 @@ export function executeDeposit(
   return { profile: nextProfile, deposit, transaction, referrerCommissionCoins };
 }
 
-export function calculateReinvestCoins(eggsAmount: number): {
+export function calculateReinvestCoins(
+  eggsAmount: number,
+  bonusRateOverride?: number,
+): {
   bonusEggs: number;
   baseCoins: number;
   bonusCoins: number;
   totalCoins: number;
+  bonusPercent: number;
 } {
+  const effectiveRate =
+    typeof bonusRateOverride === 'number' && Number.isFinite(bonusRateOverride)
+      ? Math.max(
+          REINVEST_BONUS_RATE,
+          Math.min(REINVEST_SURGE_MAX_BONUS_PERCENT / 100, bonusRateOverride),
+        )
+      : REINVEST_BONUS_RATE;
+  const bonusPercent = Math.round(effectiveRate * 100);
   const safeEggs = Math.max(0, Math.floor(eggsAmount));
   if (safeEggs <= 0) {
     return {
@@ -1250,9 +1360,10 @@ export function calculateReinvestCoins(eggsAmount: number): {
       baseCoins: 0,
       bonusCoins: 0,
       totalCoins: 0,
+      bonusPercent,
     };
   }
-  const bonusEggs = Math.max(1, Math.round(safeEggs * REINVEST_BONUS_RATE));
+  const bonusEggs = Math.max(1, Math.round(safeEggs * effectiveRate));
   const baseCoins = Math.max(1, Math.round(safeEggs * 0.07));
   const totalCoins = Math.max(baseCoins + 1, Math.round((safeEggs + bonusEggs) * 0.07));
   const bonusCoins = Math.max(1, totalCoins - baseCoins);
@@ -1261,6 +1372,7 @@ export function calculateReinvestCoins(eggsAmount: number): {
     baseCoins,
     bonusCoins,
     totalCoins: baseCoins + bonusCoins,
+    bonusPercent,
   };
 }
 
@@ -1268,12 +1380,15 @@ export function reinvestEggs(
   profile: UserFarmProfile,
   eggsAmount: number,
   nowMs: number,
+  economy?: Partial<EconomyConfig> | null,
 ):
   | {
       profile: UserFarmProfile;
       transaction: TransactionEntry;
       coinsReceived: number;
       bonusEggs: number;
+      bonusPercent: number;
+      isSurgeApplied: boolean;
     }
   | { error: string } {
   const safeEggs = Math.floor(eggsAmount);
@@ -1283,7 +1398,11 @@ export function reinvestEggs(
   if (safeEggs > profile.eggs) {
     return { error: 'Not enough eggs in your balance.' };
   }
-  const { totalCoins, bonusEggs } = calculateReinvestCoins(safeEggs);
+  const surgeStatus = getActiveReinvestSurgeStatus(economy, nowMs);
+  const { totalCoins, bonusEggs, bonusPercent } = calculateReinvestCoins(
+    safeEggs,
+    surgeStatus.bonusRate,
+  );
   const nextProfile: UserFarmProfile = {
     ...profile,
     eggs: profile.eggs - safeEggs,
@@ -1295,7 +1414,9 @@ export function reinvestEggs(
     id: `tx_reinv_${nowMs}`,
     userId: profile.uid,
     type: 'reinvest',
-    title: `Reinvested ${safeEggs.toLocaleString()} eggs (+5% extra)`,
+    title: surgeStatus.isActive
+      ? `Reinvested ${safeEggs.toLocaleString()} eggs (+${bonusPercent}% Surge Bonus)`
+      : `Reinvested ${safeEggs.toLocaleString()} eggs (+${bonusPercent}% extra)`,
     amount: totalCoins,
     currency: 'coins',
     usdValue: coinsToUsd(totalCoins),
@@ -1303,7 +1424,14 @@ export function reinvestEggs(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, transaction, coinsReceived: totalCoins, bonusEggs };
+  return {
+    profile: nextProfile,
+    transaction,
+    coinsReceived: totalCoins,
+    bonusEggs,
+    bonusPercent,
+    isSurgeApplied: surgeStatus.isActive,
+  };
 }
 
 export function getTotalAdsWatched(
@@ -2484,6 +2612,7 @@ export function buildLeaderboardRankings(
     eggs: currentUser.eggs,
     totalEggsCollected: currentUser.totalEggsCollected,
     chickensCount: userChickens,
+    badges: getLeaderboardBadgeIds(currentUser),
     isCurrentUser: true,
   });
 
@@ -2792,10 +2921,12 @@ export function claimGoldenEggDrop(
     };
   }
 
+  const perks = calculateAchievementPerks(profile);
+  const bonusCoins = GOLDEN_EGG_REWARD_COINS + perks.goldenEggBonusCoins;
   const { level, xp } = addXp(profile.level, profile.xp, GOLDEN_EGG_REWARD_XP);
   const nextProfile: UserFarmProfile = {
     ...profile,
-    coins: profile.coins + GOLDEN_EGG_REWARD_COINS,
+    coins: profile.coins + bonusCoins,
     level,
     xp,
     lastGoldenEggAtMs: nowMs,
@@ -2806,10 +2937,13 @@ export function claimGoldenEggDrop(
     id: `tx_gold_${nowMs}`,
     userId: profile.uid,
     type: 'golden_egg',
-    title: 'Golden Egg Tap Drop',
-    amount: GOLDEN_EGG_REWARD_COINS,
+    title:
+      perks.goldenEggBonusCoins > 0
+        ? `Golden Egg Tap Drop (+${perks.goldenEggBonusCoins} Badge Perk)`
+        : 'Golden Egg Tap Drop',
+    amount: bonusCoins,
     currency: 'coins',
-    usdValue: coinsToUsd(GOLDEN_EGG_REWARD_COINS),
+    usdValue: coinsToUsd(bonusCoins),
     status: 'completed',
     createdAtMs: nowMs,
   };
@@ -2817,17 +2951,32 @@ export function claimGoldenEggDrop(
   return {
     profile: nextProfile,
     transaction,
-    bonusCoins: GOLDEN_EGG_REWARD_COINS,
+    bonusCoins,
     xpGained: GOLDEN_EGG_REWARD_XP,
   };
 }
 
+export const MAX_ACHIEVEMENT_YIELD_BONUS_PCT = 25;
+
+const ACHIEVEMENT_TIER_PRIORITY: Record<AchievementTier, number> = {
+  legend: 4,
+  gold: 3,
+  silver: 2,
+  bronze: 1,
+};
+
 export interface AchievementDefinition {
   id: string;
   title: string;
+  badgeLabel: string;
   description: string;
   rewardCoins: number;
   target: number;
+  tier: AchievementTier;
+  icon: AchievementIconKey;
+  perkYieldPct: number;
+  perkGoldenCoins?: number;
+  perkLabel: string;
   getCurrent: (profile: UserFarmProfile) => number;
 }
 
@@ -2835,52 +2984,280 @@ export const ACHIEVEMENT_DEFINITIONS: AchievementDefinition[] = [
   {
     id: 'first_harvest',
     title: 'First Harvest',
+    badgeLabel: '100 Eggs',
     description: 'Collect 100 total eggs',
     rewardCoins: 75,
     target: 100,
+    tier: 'bronze',
+    icon: 'egg',
+    perkYieldPct: 1,
+    perkLabel: '+1% Egg Yield',
     getCurrent: (p) => p.totalEggsCollected,
   },
   {
     id: 'flock_5',
     title: 'Coop Builder',
+    badgeLabel: '5+ Hens',
     description: 'Own 5+ total chickens',
     rewardCoins: 150,
     target: 5,
+    tier: 'bronze',
+    icon: 'crown',
+    perkYieldPct: 1,
+    perkLabel: '+1% Egg Yield',
     getCurrent: (p) => calculateTotalChickens(p),
   },
   {
     id: 'streak_3',
     title: 'Loyal Farmer',
+    badgeLabel: '3d Streak',
     description: 'Reach a 3-day login streak',
     rewardCoins: 120,
     target: 3,
+    tier: 'bronze',
+    icon: 'flame',
+    perkYieldPct: 1,
+    perkLabel: '+1% Egg Yield',
     getCurrent: (p) => p.dailyStreak,
-  },
-  {
-    id: 'basket_pro',
-    title: 'Bigger Basket',
-    description: 'Upgrade basket to 12h+',
-    rewardCoins: 250,
-    target: 12,
-    getCurrent: (p) => p.basketTierHours,
   },
   {
     id: 'friend_1',
     title: 'Farm Recruiter',
+    badgeLabel: '1st Invite',
     description: 'Activate 1+ invited friend',
     rewardCoins: 200,
     target: 1,
+    tier: 'bronze',
+    icon: 'users',
+    perkYieldPct: 1,
+    perkLabel: '+1% Egg Yield',
     getCurrent: (p) => p.referralCount,
+  },
+  {
+    id: 'basket_pro',
+    title: 'Bigger Basket',
+    badgeLabel: '12h+ Basket',
+    description: 'Upgrade basket to 12h+',
+    rewardCoins: 250,
+    target: 12,
+    tier: 'silver',
+    icon: 'basket',
+    perkYieldPct: 1,
+    perkLabel: '+1% Egg Yield',
+    getCurrent: (p) => p.basketTierHours,
+  },
+  {
+    id: 'golden_5',
+    title: 'Golden Egg Hunter',
+    badgeLabel: '5 Gold Eggs',
+    description: 'Tap 5 Golden Eggs on the meadow',
+    rewardCoins: 350,
+    target: 5,
+    tier: 'silver',
+    icon: 'sparkles',
+    perkYieldPct: 1,
+    perkGoldenCoins: 5,
+    perkLabel: '+1% Yield · +5 Gold Coin',
+    getCurrent: (p) => p.goldenEggsFound ?? 0,
+  },
+  {
+    id: 'flock_25',
+    title: 'Coop Commander',
+    badgeLabel: '25+ Hens',
+    description: 'Own 25+ total chickens',
+    rewardCoins: 450,
+    target: 25,
+    tier: 'silver',
+    icon: 'crown',
+    perkYieldPct: 2,
+    perkLabel: '+2% Egg Yield',
+    getCurrent: (p) => calculateTotalChickens(p),
   },
   {
     id: 'egg_tycoon',
     title: 'Egg Tycoon',
+    badgeLabel: '5k Eggs',
     description: 'Collect 5,000 total eggs',
     rewardCoins: 500,
     target: 5000,
+    tier: 'silver',
+    icon: 'trophy',
+    perkYieldPct: 2,
+    perkLabel: '+2% Egg Yield',
     getCurrent: (p) => p.totalEggsCollected,
   },
+  {
+    id: 'first_payout',
+    title: 'First GRAM Payout',
+    badgeLabel: 'GRAM Payout',
+    description: 'Complete your 1st GRAM withdrawal',
+    rewardCoins: 600,
+    target: 1,
+    tier: 'gold',
+    icon: 'send',
+    perkYieldPct: 2,
+    perkLabel: '+2% Egg Yield',
+    getCurrent: (p) => (Number(p.totalWithdrawnUsd ?? 0) > 0 ? 1 : 0),
+  },
+  {
+    id: 'harvest_10k',
+    title: '10k Eggs Harvested',
+    badgeLabel: '10k Eggs',
+    description: 'Collect 10,000 total eggs',
+    rewardCoins: 800,
+    target: 10_000,
+    tier: 'gold',
+    icon: 'egg',
+    perkYieldPct: 3,
+    perkLabel: '+3% Egg Yield',
+    getCurrent: (p) => p.totalEggsCollected,
+  },
+  {
+    id: 'ref_50',
+    title: '50 Referrals Legend',
+    badgeLabel: '50 Referrals',
+    description: 'Activate 50 invited friends',
+    rewardCoins: 2500,
+    target: 50,
+    tier: 'legend',
+    icon: 'users',
+    perkYieldPct: 4,
+    perkLabel: '+4% Egg Yield',
+    getCurrent: (p) => p.referralCount,
+  },
 ];
+
+const ACHIEVEMENT_BY_ID = new Map<string, AchievementDefinition>(
+  ACHIEVEMENT_DEFINITIONS.map((def) => [def.id, def]),
+);
+
+export interface AchievementPerksSummary {
+  yieldBonusPct: number;
+  yieldMultiplier: number;
+  goldenEggBonusCoins: number;
+  claimedBadgeCount: number;
+}
+
+export function calculateAchievementPerks(
+  profile: Partial<Pick<UserFarmProfile, 'claimedAchievementIds'>>,
+): AchievementPerksSummary {
+  const rawClaimed = Array.isArray(profile.claimedAchievementIds)
+    ? profile.claimedAchievementIds
+    : [];
+  const seen = new Set<string>();
+  let yieldBonusPct = 0;
+  let goldenEggBonusCoins = 0;
+  let claimedBadgeCount = 0;
+
+  for (const id of rawClaimed) {
+    const cleanId = String(id || '').trim();
+    if (!cleanId || seen.has(cleanId)) continue;
+    const def = ACHIEVEMENT_BY_ID.get(cleanId);
+    if (!def) continue;
+    seen.add(cleanId);
+    claimedBadgeCount += 1;
+    yieldBonusPct += def.perkYieldPct;
+    goldenEggBonusCoins += def.perkGoldenCoins ?? 0;
+  }
+
+  const cappedYieldPct = Math.min(MAX_ACHIEVEMENT_YIELD_BONUS_PCT, Math.max(0, yieldBonusPct));
+  return {
+    yieldBonusPct: cappedYieldPct,
+    yieldMultiplier: Number((1 + cappedYieldPct / 100).toFixed(4)),
+    goldenEggBonusCoins,
+    claimedBadgeCount,
+  };
+}
+
+function toShowcaseBadge(def: AchievementDefinition): ShowcaseBadge {
+  return {
+    id: def.id,
+    title: def.title,
+    badgeLabel: def.badgeLabel,
+    description: def.description,
+    tier: def.tier,
+    icon: def.icon,
+    perkLabel: def.perkLabel,
+  };
+}
+
+function sortShowcaseBadges(badges: ShowcaseBadge[]): ShowcaseBadge[] {
+  return [...badges].sort((a, b) => {
+    const tierDiff = ACHIEVEMENT_TIER_PRIORITY[b.tier] - ACHIEVEMENT_TIER_PRIORITY[a.tier];
+    if (tierDiff !== 0) return tierDiff;
+    const defA = ACHIEVEMENT_BY_ID.get(a.id);
+    const defB = ACHIEVEMENT_BY_ID.get(b.id);
+    return (defB?.rewardCoins ?? 0) - (defA?.rewardCoins ?? 0);
+  });
+}
+
+export function getProfileShowcaseBadges(
+  profile: UserFarmProfile,
+  maxCount = 6,
+): ShowcaseBadge[] {
+  const claimedSet = new Set(profile.claimedAchievementIds ?? []);
+  const claimed = ACHIEVEMENT_DEFINITIONS.filter((def) => claimedSet.has(def.id)).map(
+    toShowcaseBadge,
+  );
+  return sortShowcaseBadges(claimed).slice(0, Math.max(1, maxCount));
+}
+
+export function getLeaderboardBadgeIds(
+  profile: UserFarmProfile,
+  maxCount = 8,
+): string[] {
+  const progress = getAchievementsProgress(profile);
+  const earnedDefs = progress
+    .filter((item) => item.claimed || item.unlocked)
+    .map((item) => toShowcaseBadge(item));
+  return sortShowcaseBadges(earnedDefs)
+    .slice(0, Math.max(1, maxCount))
+    .map((badge) => badge.id);
+}
+
+export function getLeaderboardEntryBadges(
+  entry: Pick<
+    LeaderboardEntry,
+    'badges' | 'totalEggsCollected' | 'inviterCount' | 'chickensCount'
+  >,
+  maxCount = 3,
+): ShowcaseBadge[] {
+  const collected = new Map<string, ShowcaseBadge>();
+
+  if (Array.isArray(entry.badges)) {
+    for (const rawId of entry.badges) {
+      const def = ACHIEVEMENT_BY_ID.get(String(rawId || '').trim());
+      if (def) {
+        collected.set(def.id, toShowcaseBadge(def));
+      }
+    }
+  }
+
+  // Always derive milestone badges from live public leaderboard metrics so existing entries display badges seamlessly
+  const totalEggs = Math.max(0, Number(entry.totalEggsCollected ?? 0));
+  const invites = Math.max(0, Number(entry.inviterCount ?? 0));
+  const chickens = Math.max(0, Number(entry.chickensCount ?? 0));
+
+  const metricCandidates: Array<[boolean, string]> = [
+    [invites >= 50, 'ref_50'],
+    [totalEggs >= 10_000, 'harvest_10k'],
+    [totalEggs >= 5_000, 'egg_tycoon'],
+    [chickens >= 25, 'flock_25'],
+    [invites >= 1, 'friend_1'],
+    [chickens >= 5, 'flock_5'],
+    [totalEggs >= 100, 'first_harvest'],
+  ];
+
+  for (const [met, id] of metricCandidates) {
+    if (!met) continue;
+    const def = ACHIEVEMENT_BY_ID.get(id);
+    if (def && !collected.has(id)) {
+      collected.set(id, toShowcaseBadge(def));
+    }
+  }
+
+  return sortShowcaseBadges(Array.from(collected.values())).slice(0, Math.max(1, maxCount));
+}
 
 export interface AchievementStatus extends AchievementDefinition {
   current: number;
@@ -2906,7 +3283,14 @@ export function claimAchievement(
   achievementId: string,
   nowMs: number,
 ):
-  | { profile: UserFarmProfile; transaction: TransactionEntry; rewardCoins: number; title: string }
+  | {
+      profile: UserFarmProfile;
+      transaction: TransactionEntry;
+      rewardCoins: number;
+      title: string;
+      badgeLabel: string;
+      perkLabel: string;
+    }
   | { error: string } {
   const status = getAchievementsProgress(profile).find((a) => a.id === achievementId);
   if (!status) {
@@ -2929,7 +3313,7 @@ export function claimAchievement(
     id: `tx_ach_${achievementId}_${nowMs}`.slice(0, 64),
     userId: profile.uid,
     type: 'achievement',
-    title: `Achievement: ${status.title}`.slice(0, 80),
+    title: `Badge: ${status.title} (${status.perkLabel})`.slice(0, 80),
     amount: status.rewardCoins,
     currency: 'coins',
     usdValue: coinsToUsd(status.rewardCoins),
@@ -2937,7 +3321,14 @@ export function claimAchievement(
     createdAtMs: nowMs,
   };
 
-  return { profile: nextProfile, transaction, rewardCoins: status.rewardCoins, title: status.title };
+  return {
+    profile: nextProfile,
+    transaction,
+    rewardCoins: status.rewardCoins,
+    title: status.title,
+    badgeLabel: status.badgeLabel,
+    perkLabel: status.perkLabel,
+  };
 }
 
 export interface ReferralMilestoneCrate {

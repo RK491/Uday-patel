@@ -436,11 +436,23 @@ service cloud.firestore {
         && data.updatedAt is timestamp;
     }
 
+    function isValidReinvestSurge(surge) {
+      return surge is map
+        && surge.keys().hasAll(['enabled', 'bonusPercent', 'startsAtMs', 'endsAtMs'])
+        && surge.keys().hasOnly(['enabled', 'bonusPercent', 'startsAtMs', 'endsAtMs', 'label'])
+        && surge.enabled is bool
+        && surge.bonusPercent is number && surge.bonusPercent >= 6 && surge.bonusPercent <= 50
+        && surge.startsAtMs is number && surge.startsAtMs >= 0
+        && surge.endsAtMs is number && surge.endsAtMs >= surge.startsAtMs
+        && (!('label' in surge) || (surge.label is string && surge.label.size() <= 48));
+    }
+
     function isValidEconomyConfig(data) {
       return data.keys().hasAll(['minWithdrawEggs', 'perReferRewardCoins', 'updatedAtMs', 'updatedAt'])
-        && data.keys().hasOnly(['minWithdrawEggs', 'perReferRewardCoins', 'updatedAtMs', 'updatedAt'])
+        && data.keys().hasOnly(['minWithdrawEggs', 'perReferRewardCoins', 'reinvestSurge', 'updatedAtMs', 'updatedAt'])
         && data.minWithdrawEggs is number && data.minWithdrawEggs >= 1 && data.minWithdrawEggs <= 1000000
         && data.perReferRewardCoins is number && data.perReferRewardCoins >= 0 && data.perReferRewardCoins <= 100000
+        && (!('reinvestSurge' in data) || isValidReinvestSurge(data.reinvestSurge))
         && data.updatedAtMs is number && data.updatedAtMs >= 0
         && data.updatedAt is timestamp;
     }
@@ -492,7 +504,7 @@ service cloud.firestore {
         && data.keys().hasOnly([
           'uid', 'displayName', 'handle', 'photoUrl', 'avatarColor', 'referralCode',
           'buyerPoints', 'inviterCount', 'eggs', 'totalEggsCollected',
-          'chickensCount', 'updatedAt'
+          'chickensCount', 'badges', 'updatedAt'
         ])
         && isValidId(data.uid)
         && data.uid == playerId
@@ -506,6 +518,7 @@ service cloud.firestore {
         && data.eggs is number && data.eggs >= 0 && data.eggs <= 100000000
         && data.totalEggsCollected is number && data.totalEggsCollected >= 0 && data.totalEggsCollected <= 500000000
         && data.chickensCount is number && data.chickensCount >= 0 && data.chickensCount <= 1000000
+        && (!('badges' in data) || isBoundedStringList(data.badges, 8))
         && data.updatedAt is timestamp;
     }
 
@@ -660,7 +673,7 @@ service cloud.firestore {
         && incoming().diff(existing()).affectedKeys().hasOnly([
           'displayName', 'handle', 'photoUrl', 'avatarColor',
           'buyerPoints', 'inviterCount', 'eggs', 'totalEggsCollected',
-          'chickensCount', 'updatedAt'
+          'chickensCount', 'badges', 'updatedAt'
         ]);
       allow delete: if false;
     }

@@ -58,6 +58,7 @@ import {
   formatPromoRewardSummary,
   formatShortTonWallet,
   getActiveRequiredChannels,
+  getActiveReinvestSurgeStatus,
   getCoopFeverProgress,
   getEffectiveAdminIds,
   getGoldenEggCooldownRemainingMs,
@@ -224,6 +225,7 @@ import {
   playChickenCluckSound,
   playClaimSound,
   playCoinChimeSound,
+  playEggCollectSound,
   playGoldenEggSound,
   playPurchaseSuccessSound,
   playSoftTapSound,
@@ -238,6 +240,7 @@ import {
   clearLocalAdminBotConfig,
   detectBrowserTelegramBotConfig,
   ensureTelegramWebAppReady,
+  fetchApiWithFallback,
   getBrowserStartParam,
   getLocalAdminBotConfig,
   getTelegramChannelUrl,
@@ -488,6 +491,7 @@ export default function App() {
     minerCostCoins?: number | null;
     reinvestEggs?: number | null;
     reinvestCoins?: number | null;
+    reinvestBonusPercent?: number | null;
     mandatory?: boolean;
   }>({
     open: false,
@@ -2418,22 +2422,25 @@ export default function App() {
       setChannelCheckError(null);
       try {
         const effectiveUid = latestProfileRef.current.uid || activePlayerIdRef.current;
-        const endpointUrl = resolveApiUrl('/api/telegram/check-channels');
-        const res = await fetch(endpointUrl, {
+        const initData = getTelegramInitData();
+        const sessionToken = playerSessionTokenRef.current;
+        const { response: res, isJson } = await fetchApiWithFallback('/api/telegram/check-channels', {
           method: 'POST',
           cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(initData ? { 'x-telegram-init-data': initData } : {}),
+            ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+          },
           body: JSON.stringify({
             playerId: effectiveUid,
-            initData: getTelegramInitData(),
-            token: playerSessionTokenRef.current,
+            initData,
+            token: sessionToken,
             requiredChannels: activeRequiredChannels,
             forceRefresh: Boolean(opts?.forceRefresh),
             _ts: Date.now(),
           }),
         });
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        const isJson = contentType.includes('application/json');
         const rawPayload = (
           isJson ? await res.json().catch(() => null) : null
         ) as (ChannelVerificationResult & { error?: string }) | null;
@@ -2443,22 +2450,67 @@ export default function App() {
 
         if (isMissingApi) {
           const tgNumericId = extractTelegramNumericUserId(effectiveUid);
-          const nowMs = Date.now();
-          const previewMode: ChannelVerificationResult['verificationMode'] = !tgNumericId
-            ? 'guest_browser'
-            : 'static_preview';
-          data = {
-            ok: true,
-            allJoined: false,
-            verificationMode: previewMode,
-            telegramUserId: tgNumericId,
-            channels: activeRequiredChannels.map((ch) => ({
-              ...ch,
-              joined: false,
-              status: previewMode === 'guest_browser' ? 'no_telegram_user' : 'static_preview',
-            })),
-            checkedAtMs: nowMs,
-          };
+          const localBot = getLocalAdminBotConfig();
+          if (tgNumericId && localBot?.token) {
+            const directChecks = await Promise.all(
+              activeRequiredChannels.map(async (ch) => {
+                const chatTarget = /^-?\d+$/.test((ch.chatId || ch.handle).trim())
+                  ? (ch.chatId || ch.handle).trim()
+                  : `@${ch.handle.trim().replace(/^@+/, '')}`;
+                try {
+                  const uRes = await fetch(
+                    `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(chatTarget)}&user_id=${encodeURIComponent(tgNumericId)}`,
+                    { cache: 'no-store' },
+                  );
+                  const uData = (await uRes.json().catch(() => ({}))) as {
+                    ok?: boolean;
+                    description?: string;
+                    result?: { status?: string; is_member?: boolean };
+                  };
+                  const st = String(uData.result?.status || 'left');
+                  const joined =
+                    Boolean(uData.ok) &&
+                    (st === 'creator' ||
+                      st === 'administrator' ||
+                      st === 'member' ||
+                      (st === 'restricted' && uData.result?.is_member === true));
+                  return {
+                    ...ch,
+                    joined,
+                    status: uData.ok ? st : 'api_error',
+                    ...(!uData.ok && uData.description ? { error: uData.description } : {}),
+                  };
+                } catch {
+                  return { ...ch, joined: false, status: 'network_error' };
+                }
+              }),
+            );
+            data = {
+              ok: true,
+              allJoined: directChecks.every((c) => c.joined),
+              verificationMode: 'telegram_bot',
+              telegramUserId: tgNumericId,
+              channels: directChecks,
+              checkedAtMs: Date.now(),
+            };
+          } else {
+            const nowMs = Date.now();
+            const previewMode: ChannelVerificationResult['verificationMode'] = !tgNumericId
+              ? 'guest_browser'
+              : 'static_preview';
+            data = {
+              ok: true,
+              allJoined: false,
+              verificationMode: previewMode,
+              telegramUserId: tgNumericId,
+              channels: activeRequiredChannels.map((ch) => ({
+                ...ch,
+                joined: false,
+                status: previewMode === 'guest_browser' ? 'no_telegram_user' : 'static_preview',
+              })),
+              checkedAtMs: nowMs,
+            };
+          }
         } else if (!res.ok || !rawPayload) {
           const errMsg =
             rawPayload?.error || `Membership check failed (HTTP ${res.status}). Tap Retry.`;
@@ -2655,21 +2707,25 @@ export default function App() {
         return { joined: false, handle: displayHandle, status: 'no_telegram_user', reason };
       }
       try {
-        const res = await fetch(resolveApiUrl('/api/telegram/check-task-channel'), {
+        const initData = getTelegramInitData();
+        const sessionToken = playerSessionTokenRef.current;
+        const { response: res, isJson } = await fetchApiWithFallback('/api/telegram/check-task-channel', {
           method: 'POST',
           cache: 'no-store',
-          headers: { 'Content-Type': 'application/json' },
+          headers: {
+            'Content-Type': 'application/json',
+            ...(initData ? { 'x-telegram-init-data': initData } : {}),
+            ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
+          },
           body: JSON.stringify({
             playerId: latestProfileRef.current.uid,
-            initData: getTelegramInitData(),
-            token: playerSessionTokenRef.current,
+            initData,
+            token: sessionToken,
             actionUrl: trimmedUrl,
             requireChannelCheck: true,
             _ts: Date.now(),
           }),
         });
-        const contentType = (res.headers.get('content-type') || '').toLowerCase();
-        const isJson = contentType.includes('application/json');
         const data = (
           isJson ? await res.json().catch(() => null) : null
         ) as {
@@ -2682,17 +2738,66 @@ export default function App() {
         } | null;
 
         const isMissingApi = !isJson || res.status === 404 || res.status === 405;
-        if (isMissingApi || data?.status === 'bot_unconfigured') {
+        if (isMissingApi) {
+          const localBot = getLocalAdminBotConfig();
+          if (localBot?.token && normalized.handle) {
+            const chatTarget = `@${normalized.handle.trim().replace(/^@+/, '')}`;
+            try {
+              const tgRes = await fetch(
+                `https://api.telegram.org/bot${localBot.token}/getChatMember?chat_id=${encodeURIComponent(chatTarget)}&user_id=${encodeURIComponent(numericUserId)}`,
+                { cache: 'no-store' },
+              );
+              const tgData = (await tgRes.json().catch(() => ({}))) as {
+                ok?: boolean;
+                description?: string;
+                result?: { status?: string; is_member?: boolean };
+              };
+              const st = String(tgData.result?.status || 'left');
+              const joined =
+                Boolean(tgData.ok) &&
+                (st === 'creator' ||
+                  st === 'administrator' ||
+                  st === 'member' ||
+                  (st === 'restricted' && tgData.result?.is_member === true));
+              if (joined) {
+                if (options?.taskId) {
+                  verifiedChannelTaskProofRef.current[options.taskId] = Date.now();
+                }
+                return { joined: true, handle: displayHandle, status: st };
+              }
+              if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
+              const directReason = !tgData.ok
+                ? tgData.description || `Could not verify ${displayHandle} — make sure the bot is an admin in the channel.`
+                : `Not joined ${displayHandle} yet — tap Join, then Claim.`;
+              triggerHapticFeedback('warning');
+              showToast(directReason);
+              return { joined: false, handle: displayHandle, status: tgData.ok ? st : 'api_error', reason: directReason };
+            } catch {
+              // Fall through to unavailable notice below
+            }
+          }
           if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
-          const reason = isMissingApi
-            ? 'Backend membership verification server unavailable. Open via Bot server.'
-            : data?.reason || 'Backend Bot verification is unavailable right now.';
+          const reason =
+            'Live verification server unreachable on this preview URL. Open from your Bot Mini App server or set Backend Server URL in Admin Panel.';
           triggerHapticFeedback('warning');
           showToast(reason);
           return {
             joined: false,
             handle: displayHandle,
-            status: isMissingApi ? 'api_error' : 'bot_unconfigured',
+            status: 'api_error',
+            reason,
+          };
+        }
+
+        if (data?.status === 'bot_unconfigured') {
+          if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
+          const reason = data?.reason || 'Backend Bot verification is unavailable right now.';
+          triggerHapticFeedback('warning');
+          showToast(reason);
+          return {
+            joined: false,
+            handle: displayHandle,
+            status: 'bot_unconfigured',
             reason,
           };
         }
@@ -2941,13 +3046,17 @@ export default function App() {
         return;
       }
       const nextProfile = countCompletedAd ? recordCompletedGateAd(res.profile) : res.profile;
-      playClaimSound(soundsEnabled);
+      playEggCollectSound(soundsEnabled);
       triggerHapticFeedback('success');
       triggerCollectConfetti();
       setShowWelcomeModal(false);
       setNowMs(now);
       if (typeof window !== 'undefined') {
-        window.dispatchEvent(new CustomEvent('alphagram:coin-arrival'));
+        window.dispatchEvent(
+          new CustomEvent('alphagram:eggs-collected', {
+            detail: { amount: res.collected },
+          }),
+        );
       }
       void persistMutation({
         nextProfile,
@@ -3168,7 +3277,7 @@ export default function App() {
   const executeReinvest = useCallback(
     (eggsAmount: number) => {
       const now = Date.now();
-      const res = reinvestEggs(latestProfileRef.current, eggsAmount, now);
+      const res = reinvestEggs(latestProfileRef.current, eggsAmount, now, economyConfigRef.current);
       if ('error' in res) {
         showToast(res.error);
         return;
@@ -3184,8 +3293,11 @@ export default function App() {
       const taskUnlockedNote = !res.profile.completedTaskIds.includes('daily_reinvest')
         ? ' · Reinvest task ready to Claim!'
         : '';
+      const bonusNote = res.isSurgeApplied
+        ? `+${res.bonusPercent}% Surge`
+        : `+${res.bonusPercent}% extra`;
       showToast(
-        `Reinvested ${eggsAmount.toLocaleString()} eggs into +${res.coinsReceived.toLocaleString()} coins (+5% extra)${taskUnlockedNote}`,
+        `Reinvested ${eggsAmount.toLocaleString()} eggs into +${res.coinsReceived.toLocaleString()} coins (${bonusNote})${taskUnlockedNote}`,
       );
     },
     [persistMutation, showToast, soundsEnabled],
@@ -3196,7 +3308,7 @@ export default function App() {
       if (watchingAdLoading) return;
       if (!(await ensureMustJoinVerified('reinvest eggs'))) return;
       const now = Date.now();
-      const precheck = reinvestEggs(latestProfileRef.current, eggsAmount, now);
+      const precheck = reinvestEggs(latestProfileRef.current, eggsAmount, now, economyConfigRef.current);
       if ('error' in precheck) {
         showToast(precheck.error);
         return;
@@ -3219,6 +3331,7 @@ export default function App() {
           kind: 'reinvest',
           reinvestEggs: eggsAmount,
           reinvestCoins: precheck.coinsReceived,
+          reinvestBonusPercent: precheck.bonusPercent,
           notice: external.message ?? null,
           network: null,
           mandatory: false,
@@ -3919,8 +4032,10 @@ export default function App() {
       setEconomyConfig(finalSaved);
       playClaimSound(soundsEnabled);
       triggerHapticFeedback('success');
+      const surge = getActiveReinvestSurgeStatus(finalSaved, Date.now());
+      const surgeToast = surge.isActive ? ` · Surge +${surge.bonusPercent}% LIVE` : '';
       showToast(
-        `Saved! Min Withdraw: ${finalSaved.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${finalSaved.perReferRewardCoins.toLocaleString()} coins`,
+        `Saved! Min Withdraw: ${finalSaved.minWithdrawEggs.toLocaleString()} eggs · Per Refer: +${finalSaved.perReferRewardCoins.toLocaleString()} coins${surgeToast}`,
       );
       return true;
     }
@@ -6447,6 +6562,8 @@ export default function App() {
           }
           botUsername={telegramBotConfig?.botUsername ?? botConfigStatus?.botUsername ?? null}
           taskPricingConfig={taskPricingConfig}
+          economyConfig={economyConfig}
+          nowMs={nowMs}
           watchingAd={watchingAdLoading}
           activeAdNetwork={activeAdNetwork}
           activeAdAction={activeAdAction}
@@ -6494,6 +6611,8 @@ export default function App() {
           profile={profile}
           transactions={transactions}
           withdrawals={withdrawals}
+          economyConfig={economyConfig}
+          nowMs={nowMs}
           onTabTap={() => playTabTapSound(soundsEnabled)}
           onOpenDeposit={() => setSubView('deposit')}
           onOpenWithdraw={() => setSubView('withdraw')}
@@ -6856,11 +6975,13 @@ export default function App() {
               profile={profile}
               pendingEggs={pendingEggs}
               collectLabel={strings.collect}
+              economyConfig={economyConfig}
               isVisible={showFarmOnMobile}
               isProfileSynced={isPlayerSynced}
               onCollect={handleCollectEggs}
               onOpenYourFarm={() => openSubView('your_farm')}
               onOpenWithdraw={() => openSubView('withdraw')}
+              onOpenReinvest={() => setShowReinvestModal(true)}
               onChickenTap={() => {
                 playChickenCluckSound(soundsEnabled);
                 triggerHapticFeedback('light');
@@ -6983,6 +7104,7 @@ export default function App() {
             minerCostCoins={adModalState.minerCostCoins ?? null}
             reinvestEggs={adModalState.reinvestEggs ?? null}
             reinvestCoins={adModalState.reinvestCoins ?? null}
+            reinvestBonusPercent={adModalState.reinvestBonusPercent ?? null}
             coopFeverAdsCollected={getCoopFeverProgress(profile, nowMs).adsCollected}
             coopFeverAdsRequired={COOP_FEVER_REQUIRED_ADS}
             fallbackNotice={adModalState.notice}
@@ -7039,6 +7161,8 @@ export default function App() {
       {showReinvestModal && (
         <ReinvestModal
           availableEggs={profile.eggs}
+          economyConfig={economyConfig}
+          nowMs={nowMs}
           loading={watchingAdLoading}
           onInvest={(eggsAmount) => void handleStartReinvestWithAd(eggsAmount)}
           onClose={() => setShowReinvestModal(false)}

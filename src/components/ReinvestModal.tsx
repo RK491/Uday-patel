@@ -1,17 +1,34 @@
 import { useState } from 'react';
-import { RefreshCw, X } from 'lucide-react';
-import { calculateReinvestCoins, MIN_REINVEST_EGGS } from '../game/economy';
+import { Flame, RefreshCw, X } from 'lucide-react';
+import {
+  calculateReinvestCoins,
+  getActiveReinvestSurgeStatus,
+  MIN_REINVEST_EGGS,
+} from '../game/economy';
+import type { EconomyConfig } from '../types/farm';
 import { CoinIcon, EggIcon } from './GameIcons';
 
 interface ReinvestModalProps {
   availableEggs: number;
+  economyConfig?: Partial<EconomyConfig> | null;
+  nowMs?: number;
   loading?: boolean;
   onInvest: (eggsAmount: number) => void;
   onClose: () => void;
 }
 
+function formatSurgeCountdown(ms: number): string {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+}
+
 export function ReinvestModal({
   availableEggs,
+  economyConfig,
+  nowMs,
   loading = false,
   onInvest,
   onClose,
@@ -21,8 +38,10 @@ export function ReinvestModal({
     String(Math.max(MIN_REINVEST_EGGS, Math.min(safeAvailable, 500))),
   );
 
+  const liveNowMs = nowMs ?? Date.now();
+  const surgeStatus = getActiveReinvestSurgeStatus(economyConfig, liveNowMs);
   const numericReinvest = Math.max(0, Math.floor(Number(reinvestInput) || 0));
-  const preview = calculateReinvestCoins(numericReinvest);
+  const preview = calculateReinvestCoins(numericReinvest, surgeStatus.bonusRate);
   const canInvest =
     !loading &&
     numericReinvest >= MIN_REINVEST_EGGS &&
@@ -46,7 +65,7 @@ export function ReinvestModal({
                 id="reinvest-modal-title"
                 className="text-base font-extrabold text-stone-900 dark:text-stone-100 leading-tight"
               >
-                Reinvest Eggs (+5% Extra)
+                Reinvest Eggs (+{surgeStatus.bonusPercent}% {surgeStatus.isActive ? 'Surge' : 'Extra'})
               </h3>
               <p className="text-[11px] font-semibold text-stone-500 dark:text-stone-400">
                 Min. {MIN_REINVEST_EGGS.toLocaleString()} eggs · Instant Coin boost
@@ -62,6 +81,34 @@ export function ReinvestModal({
             <X className="w-4 h-4" />
           </button>
         </div>
+
+        {surgeStatus.isActive && (
+          <div className="clay-card-warm !rounded-2xl px-3.5 py-2.5 flex items-center justify-between gap-2 border border-amber-300/80 dark:border-amber-700/60">
+            <div className="flex items-center gap-2 min-w-0">
+              <Flame className="w-4 h-4 text-orange-500 fill-orange-400 shrink-0" />
+              <div className="min-w-0">
+                <div className="text-xs font-extrabold text-amber-950 dark:text-amber-100 truncate">
+                  {surgeStatus.label}
+                </div>
+                <div className="text-[11px] font-bold text-amber-800 dark:text-amber-300">
+                  +{surgeStatus.bonusPercent}% total (+5% Base + {surgeStatus.extraBoostPercent}% Surge)
+                </div>
+              </div>
+            </div>
+            <span className="font-mono-num tabular-nums text-[11px] font-extrabold text-amber-900 dark:text-amber-200 bg-amber-200/70 dark:bg-amber-900/60 px-2 py-1 rounded-lg shrink-0">
+              {formatSurgeCountdown(surgeStatus.remainingMs)}
+            </span>
+          </div>
+        )}
+
+        {!surgeStatus.isActive && surgeStatus.isScheduled && (
+          <div className="clay-inset !rounded-xl px-3 py-2 text-[11px] font-bold text-stone-600 dark:text-stone-300 flex items-center justify-between gap-2">
+            <span className="truncate">Upcoming: {surgeStatus.label}</span>
+            <span className="font-mono-num tabular-nums shrink-0 text-amber-700 dark:text-amber-300">
+              Starts in {formatSurgeCountdown(surgeStatus.startsInMs)}
+            </span>
+          </div>
+        )}
 
         <div className="space-y-2">
           <div className="flex justify-between text-xs font-semibold text-stone-500 dark:text-stone-400">
@@ -101,7 +148,9 @@ export function ReinvestModal({
 
         <div className="clay-card-mint !rounded-2xl p-3.5 space-y-1.5">
           <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
-            <span>+5% Extra Eggs Bonus</span>
+            <span>
+              +{surgeStatus.bonusPercent}% {surgeStatus.isActive ? 'Surge Eggs Bonus' : 'Extra Eggs Bonus'}
+            </span>
             <span className="font-mono-num font-bold">+{preview.bonusEggs.toLocaleString()} eggs</span>
           </div>
           <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
@@ -109,7 +158,9 @@ export function ReinvestModal({
             <span className="font-mono-num font-bold">+{preview.baseCoins.toLocaleString()}</span>
           </div>
           <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
-            <span>+5% Bonus coins</span>
+            <span>
+              +{surgeStatus.bonusPercent}% {surgeStatus.isActive ? 'Base + Surge Bonus' : 'Bonus coins'}
+            </span>
             <span className="font-mono-num font-bold">+{preview.bonusCoins.toLocaleString()}</span>
           </div>
           <div className="flex justify-between text-sm font-extrabold text-emerald-950 dark:text-emerald-100 pt-1.5 border-t border-emerald-200 dark:border-emerald-800/60">
@@ -133,7 +184,11 @@ export function ReinvestModal({
           onClick={() => onInvest(numericReinvest)}
           className="clay-btn clay-btn-emerald disabled:opacity-55 w-full min-h-[48px] rounded-2xl font-extrabold text-sm"
         >
-          {loading ? 'Starting Ad...' : 'Invest & Watch Ad'}
+          {loading
+            ? 'Starting Ad...'
+            : surgeStatus.isActive
+              ? `Invest (+${surgeStatus.bonusPercent}% Surge) & Watch Ad`
+              : 'Invest & Watch Ad'}
         </button>
       </div>
     </div>

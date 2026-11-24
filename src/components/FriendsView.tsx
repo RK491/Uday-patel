@@ -27,8 +27,8 @@ import {
   openTelegramForwardShare,
 } from '../utils/referralShare';
 import { detectBrowserTelegramBotConfig } from '../utils/telegram';
-import clayHenMascot from '../assets/images/clay_hen_mascot_1794678825872.jpg';
-import clayEggBasket from '../assets/images/clay_egg_basket_1794678826026.jpg';
+import animeHenMascot from '../assets/images/anime_hen_mascot_1795509839642.jpg';
+import animeEggBasket from '../assets/images/anime_egg_basket_1795509840638.jpg';
 import { ChickenSprite, CoinIcon } from './GameIcons';
 
 function ReferralGrowthTooltip({
@@ -188,17 +188,17 @@ export function FriendsView({
         </div>
       </div>
 
-      {/* Clay Mascot & Reward Trio Hero */}
+      {/* Anime Mascot & Reward Trio Hero */}
       <div className="relative flex items-center justify-center gap-4 py-1">
         <motion.div
           whileHover={{ scale: 1.08, rotate: -6 }}
-          transition={{ type: 'spring', stiffness: 360, damping: 20 }}
+          transition={{ type: 'spring', stiffness: 340, damping: 20 }}
           className="w-16 h-16 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden"
         >
           {!basketImgFailed ? (
             <img
-              src={clayEggBasket}
-              alt="Clay egg basket reward"
+              src={animeEggBasket}
+              alt="Anime egg basket reward"
               referrerPolicy="no-referrer"
               onError={() => setBasketImgFailed(true)}
               className="w-full h-full object-cover rounded-xl"
@@ -219,11 +219,11 @@ export function FriendsView({
           >
             {!heroImgFailed ? (
               <img
-                src={clayHenMascot}
-                alt="Clay Alpha Gram mascot"
+                src={animeHenMascot}
+                alt="Anime Alpha Gram hen mascot"
                 referrerPolicy="no-referrer"
                 onError={() => setHeroImgFailed(true)}
-                className="w-full h-full object-cover rounded-[1.25rem]"
+                className="w-full h-full object-cover rounded-[1.15rem]"
               />
             ) : (
               <ChickenSprite breed="leghorn" className="w-18 h-18" />

@@ -8,6 +8,7 @@ import {
   SEASON_TOP10_PRIZE_WEIGHTS,
 } from '../game/economy';
 import { CoinIcon, EggIcon } from './GameIcons';
+import animeTrophyCrest from '../assets/images/anime_trophy_crest_1795509840747.jpg';
 
 interface LeaderboardViewProps {
   profile: UserFarmProfile;
@@ -30,6 +31,7 @@ export function LeaderboardView({
 }: LeaderboardViewProps) {
   const [subTab, setSubTab] = useState<LeaderboardSubTab>('referrals');
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [crestFailed, setCrestFailed] = useState(false);
 
   useEffect(() => {
     const id = window.setInterval(() => setNowMs(Date.now()), 60_000);
@@ -80,8 +82,18 @@ export function LeaderboardView({
       <section className="clay-card-warm p-4 sm:p-5 space-y-3">
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3 min-w-0">
-            <div className="w-12 h-12 rounded-2xl clay-icon-well-amber flex items-center justify-center shrink-0">
-              <Trophy className="w-6 h-6 text-amber-600 dark:text-amber-400" />
+            <div className="w-12 h-12 rounded-2xl clay-icon-well-amber p-0.5 flex items-center justify-center overflow-hidden shrink-0">
+              {!crestFailed ? (
+                <img
+                  src={animeTrophyCrest}
+                  alt="Anime golden winged egg season trophy crest"
+                  referrerPolicy="no-referrer"
+                  onError={() => setCrestFailed(true)}
+                  className="w-full h-full object-cover rounded-[0.8rem]"
+                />
+              ) : (
+                <Trophy className="w-6 h-6 text-amber-900 dark:text-amber-200" />
+              )}
             </div>
             <div className="min-w-0">
               <h1 className="font-display text-lg font-extrabold text-stone-900 dark:text-stone-100 truncate">
