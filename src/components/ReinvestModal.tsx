@@ -49,15 +49,15 @@ export function ReinvestModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 dark:bg-black/75 backdrop-blur-xs p-4"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="reinvest-modal-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-5 space-y-4">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2 min-w-0">
-            <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
+            <div className="w-9 h-9 rounded-2xl clay-icon-well border-pink-300 dark:border-pink-400/50 flex items-center justify-center text-emerald-600 dark:text-emerald-400 shrink-0">
               <RefreshCw className="w-4 h-4" />
             </div>
             <div className="min-w-0">
@@ -76,7 +76,7 @@ export function ReinvestModal({
             type="button"
             aria-label="Close reinvest modal"
             onClick={onClose}
-            className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
+            className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -146,7 +146,7 @@ export function ReinvestModal({
           </div>
         </div>
 
-        <div className="clay-card-mint !rounded-2xl p-3.5 space-y-1.5">
+        <div className="kawaii-panel-mint p-3.5 space-y-1.5">
           <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
             <span>
               +{surgeStatus.bonusPercent}% {surgeStatus.isActive ? 'Surge Eggs Bonus' : 'Extra Eggs Bonus'}

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { Minus, Plus } from 'lucide-react';
-import { motion } from 'motion/react';
+import { motion, useReducedMotion } from 'motion/react';
 import { CHICKEN_PACKS, coinsToUsd } from '../game/economy';
 import type { ChickenBreedId, UserFarmProfile } from '../types/farm';
 import { ChickenSprite, CoinIcon, EggIcon } from './GameIcons';
@@ -13,6 +13,7 @@ interface PacksViewProps {
 }
 
 export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: PacksViewProps) {
+  const prefersReducedMotion = useReducedMotion();
   const [quantities, setQuantities] = useState<Record<ChickenBreedId, number>>({
     leghorn: 1,
     rhode: 1,
@@ -81,14 +82,19 @@ export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: Packs
           return (
             <motion.div
               key={pack.id}
-              initial={{ opacity: 0, y: 12, scale: 0.98 }}
+              data-testid={`chicken-pack-card-${pack.id}`}
+              initial={prefersReducedMotion ? false : { opacity: 0, y: 16, scale: 0.96 }}
               animate={{ opacity: 1, y: 0, scale: 1 }}
-              transition={{ duration: 0.24, delay: index * 0.05, ease: [0.16, 1, 0.3, 1] }}
-              whileHover={{ y: -2 }}
-              className="group clay-card p-4 space-y-3"
+              transition={
+                prefersReducedMotion
+                  ? { duration: 0.1 }
+                  : { duration: 0.3, delay: index * 0.055, ease: [0.22, 1, 0.36, 1] }
+              }
+              whileHover={prefersReducedMotion ? undefined : { y: -4, scale: 1.012 }}
+              className="group clay-card hover:border-pink-400/80 dark:hover:border-pink-400/70 hover:shadow-[0_10px_24px_-8px_rgba(244,114,182,0.28)] p-4 space-y-3 transition-shadow duration-200"
             >
               <div className="flex items-center gap-3.5">
-                <div className="w-16 h-16 rounded-2xl clay-icon-well flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-105 group-hover:-rotate-3">
+                <div className="w-16 h-16 rounded-2xl clay-icon-well group-hover:border-pink-400/70 flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-110 group-hover:-rotate-6">
                   <ChickenSprite breed={pack.id} className="w-13 h-13 animate-chicken-bob" />
                 </div>
 
@@ -97,7 +103,7 @@ export function PacksView({ profile, buyingBusy = false, onBuy, onTopUp }: Packs
                     <h2 className="text-base font-extrabold text-stone-900 dark:text-stone-100 truncate">
                       {pack.name}
                     </h2>
-                    <span className="clay-inset !rounded-xl px-2.5 py-0.5 text-xs font-bold text-stone-600 dark:text-stone-300 whitespace-nowrap">
+                    <span className="clay-inset group-hover:border-pink-300/70 !rounded-xl px-2.5 py-0.5 text-xs font-bold text-stone-600 dark:text-stone-300 whitespace-nowrap transition-colors">
                       Owned: <span className="font-mono-num text-stone-900 dark:text-stone-100">{owned}</span>
                     </span>
                   </div>

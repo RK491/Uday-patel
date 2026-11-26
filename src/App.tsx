@@ -265,7 +265,14 @@ import {
   triggerHapticFeedback,
   verifyTelegramBotTokenDirect,
 } from './utils/telegram';
-import { applyThemeToDocument, getStoredTheme, setStoredTheme, type ThemeMode } from './utils/theme';
+import {
+  applyThemeToDocument,
+  getStoredTheme,
+  getStoredWeatherEffectsEnabled,
+  setStoredTheme,
+  setStoredWeatherEffectsEnabled,
+  type ThemeMode,
+} from './utils/theme';
 import { AdminPanelView } from './components/AdminPanelView';
 import { BottomNav } from './components/BottomNav';
 import { ChannelCheckModal } from './components/ChannelCheckPanel';
@@ -532,6 +539,9 @@ export default function App() {
   soundsEnabledRef.current = soundsEnabled;
   const allAudioMuted = isAllAudioMuted(audioSettings);
   const [themeMode, setThemeMode] = useState<ThemeMode>(() => getStoredTheme());
+  const [weatherEffectsEnabled, setWeatherEffectsEnabled] = useState<boolean>(() =>
+    getStoredWeatherEffectsEnabled(),
+  );
   const [notificationPermission, setNotificationPermission] = useState(() =>
     getBrowserNotificationPermission(),
   );
@@ -682,6 +692,15 @@ export default function App() {
     setThemeMode((prev) => {
       const next: ThemeMode = prev === 'dark' ? 'light' : 'dark';
       setStoredTheme(next);
+      return next;
+    });
+  }, [soundsEnabled]);
+
+  const handleToggleWeatherEffects = useCallback(() => {
+    playTabTapSound(soundsEnabled);
+    setWeatherEffectsEnabled((prev) => {
+      const next = !prev;
+      setStoredWeatherEffectsEnabled(next);
       return next;
     });
   }, [soundsEnabled]);
@@ -7185,7 +7204,7 @@ export default function App() {
             animate={{ opacity: 1, y: 0, scale: 1 }}
             exit={{ opacity: 0, y: 10, scale: 0.94 }}
             transition={{ type: 'spring', stiffness: 440, damping: 28 }}
-            className="clay-card-dark fixed bottom-20 left-1/2 -translate-x-1/2 z-50 !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap flex items-center gap-2 shadow-2xl"
+            className="clay-card-dark fixed bottom-20 left-1/2 -translate-x-1/2 z-[60] pointer-events-none !rounded-2xl text-white px-4 py-2.5 text-xs sm:text-sm font-bold whitespace-nowrap flex items-center gap-2 shadow-2xl"
           >
             <Sparkles className="w-4 h-4 text-amber-300 shrink-0" />
             <span>{toastText}</span>
@@ -7220,6 +7239,7 @@ export default function App() {
               economyConfig={economyConfig}
               isVisible={showFarmOnMobile}
               isProfileSynced={isPlayerSynced}
+              weatherEffectsEnabled={weatherEffectsEnabled}
               onCollect={handleCollectEggs}
               onOpenYourFarm={() => openSubView('your_farm')}
               onOpenWithdraw={() => openSubView('withdraw')}
@@ -7455,16 +7475,18 @@ export default function App() {
           musicEnabled={musicEnabled}
           soundsEnabled={soundsEnabled}
           telegramRemindersEnabled={profile.telegramRemindersEnabled !== false}
+          weatherEffectsEnabled={weatherEffectsEnabled}
           themeMode={themeMode}
           onChangeLanguage={handleChangeLanguage}
           onToggleMusic={handleToggleMusic}
           onToggleSounds={handleToggleSounds}
           onToggleTelegramReminders={handleToggleTelegramReminders}
+          onToggleWeatherEffects={handleToggleWeatherEffects}
           onToggleTheme={handleToggleTheme}
           onClose={() => setShowSettings(false)}
         />
       )}
-      <OfflineIndicator />
+      <OfflineIndicator showToast={showToast} />
     </div>
   );
 }

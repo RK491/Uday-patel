@@ -253,7 +253,12 @@ export function detectBrowserTelegramBotConfig(overrides?: {
   serverBotUsername?: string;
   serverAppShortName?: string;
 }): TelegramBotConfig {
-  const env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env;
+  let env: Record<string, string | undefined> | undefined;
+  try {
+    env = (import.meta as ImportMeta & { env?: Record<string, string | undefined> })?.env;
+  } catch {
+    env = undefined;
+  }
   let cachedBotUsername = '';
   let cachedAppShortName = '';
   try {

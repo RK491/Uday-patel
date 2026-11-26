@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Download, Smartphone, WifiOff, X } from 'lucide-react';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
 import { usePWAInstall } from '../hooks/usePWAInstall';
@@ -48,12 +48,12 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
 
         {showIOSGuide && (
           <div
-            className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-xs p-4"
+            className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-4"
             role="dialog"
             aria-modal="true"
             aria-labelledby="ios-pwa-title"
           >
-            <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
+            <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-5 space-y-4">
               <div className="flex items-center justify-between">
                 <h3 id="ios-pwa-title" className="text-base font-extrabold text-stone-900 dark:text-stone-100">
                   Install on iPhone / iPad
@@ -62,7 +62,7 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
                   type="button"
                   onClick={() => setShowIOSGuide(false)}
                   aria-label="Close iOS install instructions"
-                  className="clay-btn clay-btn-neutral w-8 h-8 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+                  className="clay-btn clay-btn-neutral w-8 h-8 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
                 >
                   <X className="w-4 h-4" />
                 </button>
@@ -91,8 +91,26 @@ export function PWAInstallButton({ compact = false }: { compact?: boolean }) {
   return null;
 }
 
-export function OfflineIndicator() {
+interface OfflineIndicatorProps {
+  showToast?: (message: string) => void;
+}
+
+export function OfflineIndicator({ showToast }: OfflineIndicatorProps) {
   const isOnline = useOnlineStatus();
+  const prevOnlineRef = useRef<boolean>(isOnline);
+  const showToastRef = useRef(showToast);
+  showToastRef.current = showToast;
+
+  useEffect(() => {
+    if (prevOnlineRef.current === isOnline) return;
+    prevOnlineRef.current = isOnline;
+
+    if (!isOnline) {
+      showToastRef.current?.('Connection lost — Offline Mode active');
+    } else {
+      showToastRef.current?.('Connection restored — Back online!');
+    }
+  }, [isOnline]);
 
   if (isOnline) return null;
 
@@ -100,7 +118,7 @@ export function OfflineIndicator() {
     <div
       role="status"
       aria-live="polite"
-      className="clay-card-warm fixed bottom-20 left-4 z-50 flex items-center gap-2 !rounded-2xl px-3.5 py-2 text-xs font-extrabold text-amber-950 dark:text-amber-200 shadow-lg"
+      className="clay-card-warm fixed bottom-20 left-4 z-40 flex items-center gap-2 !rounded-2xl px-3.5 py-2 text-xs font-extrabold text-amber-950 dark:text-amber-200 shadow-lg pointer-events-none"
     >
       <WifiOff className="w-3.5 h-3.5 text-amber-700 dark:text-amber-400 shrink-0" />
       <span>Offline Mode — Cached farm active</span>

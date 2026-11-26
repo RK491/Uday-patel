@@ -17,6 +17,7 @@ import {
   Sparkles,
   Sun,
   Volume2,
+  Wind,
   X,
   Zap,
 } from 'lucide-react';
@@ -681,30 +682,41 @@ export function YourFarmView({
               </button>
             </div>
           ) : (
-            CHICKEN_PACKS.filter((p) => (ownedCounts[p.id] ?? 0) > 0).map((pack) => {
-            const qty = ownedCounts[pack.id] ?? 0;
-            const subtotal = qty * pack.eggsPerHour;
-            return (
-              <div key={pack.id} className="p-3.5 flex items-center justify-between gap-3">
-                <div className="flex items-center gap-3">
-                  <div className="w-12 h-12 rounded-2xl clay-icon-well flex items-center justify-center">
-                    <ChickenSprite breed={pack.id} className="w-10 h-10 animate-chicken-bob" />
-                  </div>
-                  <div>
-                    <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">{pack.name}</div>
-                    <div className="text-xs text-stone-500 dark:text-stone-400 font-mono-num">
-                      {qty} {qty === 1 ? 'chicken' : 'chickens'} · {pack.eggsPerHour} eggs/h each
+            CHICKEN_PACKS.filter((p) => (ownedCounts[p.id] ?? 0) > 0).map((pack, idx) => {
+              const qty = ownedCounts[pack.id] ?? 0;
+              const subtotal = qty * pack.eggsPerHour;
+              return (
+                <motion.div
+                  key={pack.id}
+                  initial={prefersReducedMotion ? false : { opacity: 0, y: 10, scale: 0.97 }}
+                  animate={{ opacity: 1, y: 0, scale: 1 }}
+                  transition={
+                    prefersReducedMotion
+                      ? { duration: 0.1 }
+                      : { duration: 0.28, delay: idx * 0.05, ease: [0.22, 1, 0.36, 1] }
+                  }
+                  whileHover={prefersReducedMotion ? undefined : { y: -2, scale: 1.01 }}
+                  className="group p-3.5 flex items-center justify-between gap-3 transition-colors hover:bg-pink-50/45 dark:hover:bg-pink-950/20"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className="w-12 h-12 rounded-2xl clay-icon-well group-hover:border-pink-300 flex items-center justify-center transition-transform duration-200 group-hover:scale-110 group-hover:-rotate-3">
+                      <ChickenSprite breed={pack.id} className="w-10 h-10 animate-chicken-bob" />
+                    </div>
+                    <div>
+                      <div className="text-sm font-extrabold text-stone-900 dark:text-stone-100">{pack.name}</div>
+                      <div className="text-xs text-stone-500 dark:text-stone-400 font-mono-num">
+                        {qty} {qty === 1 ? 'chicken' : 'chickens'} · {pack.eggsPerHour} eggs/h each
+                      </div>
                     </div>
                   </div>
-                </div>
 
-                <div className="clay-card-mint !rounded-xl flex items-center gap-1 px-2.5 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300 font-mono-num">
-                  <EggIcon className="w-3.5 h-3.5" />
-                  <span>{subtotal} eggs/h</span>
-                </div>
-              </div>
-            );
-          })
+                  <div className="clay-card-mint !rounded-xl flex items-center gap-1 px-2.5 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300 font-mono-num">
+                    <EggIcon className="w-3.5 h-3.5" />
+                    <span>{subtotal} eggs/h</span>
+                  </div>
+                </motion.div>
+              );
+            })
           )}
         </div>
       </div>
@@ -850,11 +862,13 @@ interface SettingsModalProps {
   musicEnabled: boolean;
   soundsEnabled: boolean;
   telegramRemindersEnabled?: boolean;
+  weatherEffectsEnabled?: boolean;
   themeMode: ThemeMode;
   onChangeLanguage: (lang: LanguageCode) => void;
   onToggleMusic: () => void;
   onToggleSounds: () => void;
   onToggleTelegramReminders?: () => void;
+  onToggleWeatherEffects?: () => void;
   onToggleTheme: () => void;
   onClose: () => void;
 }
@@ -864,11 +878,13 @@ export function SettingsModal({
   musicEnabled,
   soundsEnabled,
   telegramRemindersEnabled = true,
+  weatherEffectsEnabled = true,
   themeMode,
   onChangeLanguage,
   onToggleMusic,
   onToggleSounds,
   onToggleTelegramReminders,
+  onToggleWeatherEffects,
   onToggleTheme,
   onClose,
 }: SettingsModalProps) {
@@ -877,12 +893,12 @@ export function SettingsModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-xs p-4"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="settings-modal-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-5 space-y-4">
         <div className="flex items-center justify-between">
           <h2 id="settings-modal-title" className="text-lg font-extrabold text-stone-900 dark:text-stone-100">
             {strings.languageAndAudio}
@@ -891,7 +907,7 @@ export function SettingsModal({
             type="button"
             aria-label="Close settings"
             onClick={onClose}
-            className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+            className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
           >
             <X className="w-4 h-4" />
           </button>
@@ -996,6 +1012,36 @@ export function SettingsModal({
               />
             </button>
           </div>
+
+          {onToggleWeatherEffects && (
+            <div className="px-4 py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="flex items-center gap-2.5 text-sm font-bold text-stone-800 dark:text-stone-100">
+                  <Wind className="w-4 h-4 text-emerald-500 dark:text-emerald-400 shrink-0" />
+                  <span>Meadow Weather Effects</span>
+                </div>
+                <div className="text-[11px] text-stone-500 dark:text-stone-400 pl-6">
+                  Floating pollen &amp; falling leaves
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={weatherEffectsEnabled}
+                aria-label="Toggle meadow weather effects"
+                onClick={onToggleWeatherEffects}
+                className={`w-12 h-7 rounded-full p-1 transition-colors shrink-0 cursor-pointer ${
+                  weatherEffectsEnabled ? 'bg-emerald-500' : 'bg-stone-300 dark:bg-stone-700'
+                }`}
+              >
+                <span
+                  className={`block w-5 h-5 rounded-full bg-white shadow transition-transform ${
+                    weatherEffectsEnabled ? 'translate-x-5' : 'translate-x-0'
+                  }`}
+                />
+              </button>
+            </div>
+          )}
 
           {onToggleTelegramReminders && (
             <div className="px-4 py-3 flex items-center justify-between gap-3">

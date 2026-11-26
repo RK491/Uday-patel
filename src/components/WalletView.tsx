@@ -561,12 +561,12 @@ export function WalletView({
       {/* Reinvest Modal */}
       {showReinvestModal && (
         <div
-          className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-xs p-4"
+          className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="reinvest-modal-title"
         >
-          <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
+          <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 id="reinvest-modal-title" className="text-lg font-extrabold text-stone-900 dark:text-stone-100">
                 Reinvest Eggs (+{surgeStatus.bonusPercent}%{surgeStatus.isActive ? ' Surge' : ''})
@@ -575,7 +575,7 @@ export function WalletView({
                 type="button"
                 aria-label="Close reinvest modal"
                 onClick={() => setShowReinvestModal(false)}
-                className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+                className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -611,7 +611,7 @@ export function WalletView({
               </div>
             </div>
 
-            <div className="clay-card-mint !rounded-2xl p-3.5 space-y-1">
+            <div className="kawaii-panel-mint p-3.5 space-y-1">
               <div className="flex justify-between text-xs text-emerald-800 dark:text-emerald-300">
                 <span>Base coins</span>
                 <span className="font-mono-num font-bold">+{preview.baseCoins.toLocaleString()}</span>

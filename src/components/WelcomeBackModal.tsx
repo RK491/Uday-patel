@@ -23,12 +23,12 @@ export function WelcomeBackModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 backdrop-blur-sm p-4"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-sm p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="welcome-back-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-sm p-6 text-center">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-6 text-center">
         <h2 id="welcome-back-title" className="text-2xl font-extrabold text-amber-950 dark:text-amber-100 tracking-tight">
           {headingText}
         </h2>
@@ -38,7 +38,7 @@ export function WelcomeBackModal({
         </p>
 
         <div className="my-5 flex items-center justify-center">
-          <div className="animate-clay-float clay-card-warm relative w-40 h-40 !rounded-full p-1.5 flex items-center justify-center overflow-hidden">
+          <div className="animate-clay-float kawaii-panel-peach relative w-40 h-40 !rounded-full p-1.5 flex items-center justify-center overflow-hidden">
             {!imgFailed ? (
               <img
                 src={animeEggBasketHero}
@@ -53,7 +53,7 @@ export function WelcomeBackModal({
           </div>
         </div>
 
-        <div className="clay-inset mx-auto mb-5 w-48 px-4 py-3">
+        <div className="kawaii-panel-lavender mx-auto mb-5 w-48 px-4 py-3">
           <div className="flex items-center justify-center gap-2">
             <EggIcon className="w-7 h-7" />
             <span className="text-2xl font-extrabold text-stone-900 dark:text-stone-100 font-mono-num">

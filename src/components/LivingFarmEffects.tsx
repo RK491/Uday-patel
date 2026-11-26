@@ -121,13 +121,42 @@ interface LivingFarmEffectsProps {
   boosterActive: boolean;
   droneActive: boolean;
   isPaused?: boolean;
+  weatherEffectsEnabled?: boolean;
   children?: React.ReactNode;
 }
+
+const CSS_POLLEN_SPECS = [
+  { left: '11%', top: '34%', size: 5, delay: '-0.8s', duration: '6.4s', tint: 'gold' },
+  { left: '22%', top: '58%', size: 4, delay: '-2.1s', duration: '7.1s', tint: 'cream' },
+  { left: '31%', top: '41%', size: 6, delay: '-4.2s', duration: '6.8s', tint: 'gold' },
+  { left: '43%', top: '67%', size: 4, delay: '-1.5s', duration: '7.6s', tint: 'mint' },
+  { left: '52%', top: '30%', size: 5, delay: '-3.4s', duration: '6.1s', tint: 'cream' },
+  { left: '61%', top: '54%', size: 6, delay: '-5.2s', duration: '7.4s', tint: 'gold' },
+  { left: '72%', top: '42%', size: 4, delay: '-0.4s', duration: '6.9s', tint: 'cream' },
+  { left: '84%', top: '62%', size: 5, delay: '-2.8s', duration: '7.8s', tint: 'gold' },
+  { left: '17%', top: '76%', size: 4, delay: '-4.9s', duration: '6.3s', tint: 'mint' },
+  { left: '37%', top: '81%', size: 5, delay: '-1.1s', duration: '7.2s', tint: 'gold' },
+  { left: '66%', top: '74%', size: 4, delay: '-3.9s', duration: '6.6s', tint: 'cream' },
+  { left: '89%', top: '36%', size: 5, delay: '-5.6s', duration: '7.5s', tint: 'gold' },
+] as const;
+
+const CSS_LEAF_SPECS = [
+  { left: '9%', top: '12%', size: 12, delay: '-1.2s', duration: '10.6s', fill: '#86EFAC' },
+  { left: '24%', top: '8%', size: 10, delay: '-5.4s', duration: '12.2s', fill: '#F9A8D4' },
+  { left: '38%', top: '15%', size: 11, delay: '-8.1s', duration: '11.1s', fill: '#FDE047' },
+  { left: '54%', top: '10%', size: 10, delay: '-3.3s', duration: '13.4s', fill: '#FBCFE8' },
+  { left: '69%', top: '18%', size: 12, delay: '-6.7s', duration: '10.9s', fill: '#4ADE80' },
+  { left: '83%', top: '11%', size: 10, delay: '-9.5s', duration: '12.6s', fill: '#FDBA74' },
+  { left: '15%', top: '36%', size: 11, delay: '-4.5s', duration: '11.8s', fill: '#F9A8D4' },
+  { left: '47%', top: '31%', size: 10, delay: '-7.2s', duration: '12.9s', fill: '#86EFAC' },
+  { left: '77%', top: '39%', size: 11, delay: '-2.1s', duration: '11.4s', fill: '#FDE047' },
+] as const;
 
 export function LivingFarmEffects({
   boosterActive,
   droneActive,
   isPaused = false,
+  weatherEffectsEnabled = true,
   children,
 }: LivingFarmEffectsProps) {
   const prefersReducedMotion = useReducedMotion();
@@ -301,51 +330,53 @@ export function LivingFarmEffects({
       }
       ctx.restore();
 
-      // 2. Komorebi Sunlit Pollen Motes
-      for (const m of motes) {
-        m.x += (m.vx + Math.sin(elapsed * 0.8 + m.phase) * 3.5) * dt;
-        m.y += (m.vy + Math.cos(elapsed * 0.7 + m.phase) * 2) * dt;
-        if (m.x > W + 8) m.x = -6;
-        if (m.y < -8) m.y = H + 6;
+      // 2. Komorebi Sunlit Pollen Motes (when weather effects enabled)
+      if (weatherEffectsEnabled) {
+        for (const m of motes) {
+          m.x += (m.vx + Math.sin(elapsed * 0.8 + m.phase) * 3.5) * dt;
+          m.y += (m.vy + Math.cos(elapsed * 0.7 + m.phase) * 2) * dt;
+          if (m.x > W + 8) m.x = -6;
+          if (m.y < -8) m.y = H + 6;
 
-        const twinkle = 0.3 + 0.6 * (0.5 + 0.5 * Math.sin(elapsed * 2 + m.phase));
-        ctx.fillStyle = boosterActive
-          ? `rgba(110, 231, 183, ${(twinkle * 0.82).toFixed(2)})`
-          : `rgba(254, 240, 138, ${(twinkle * 0.8).toFixed(2)})`;
-        ctx.beginPath();
-        ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
-        ctx.fill();
-      }
-
-      // 3. Drifting Sakura Cherry-Blossom Petals
-      for (const p of petals) {
-        p.x += (p.vx + Math.sin(elapsed * 1.1 + p.phase) * 9) * dt;
-        p.y += (p.vy + Math.cos(elapsed * 1.4 + p.phase) * 4) * dt;
-        p.rot += p.vrot * dt;
-
-        if (p.x > W + 12) p.x = -10;
-        if (p.y > H + 12) {
-          p.y = -10;
-          p.x = Math.random() * W;
+          const twinkle = 0.3 + 0.6 * (0.5 + 0.5 * Math.sin(elapsed * 2 + m.phase));
+          ctx.fillStyle = boosterActive
+            ? `rgba(110, 231, 183, ${(twinkle * 0.82).toFixed(2)})`
+            : `rgba(254, 240, 138, ${(twinkle * 0.8).toFixed(2)})`;
+          ctx.beginPath();
+          ctx.arc(m.x, m.y, m.r, 0, Math.PI * 2);
+          ctx.fill();
         }
 
-        const flutter = 0.55 + 0.45 * Math.sin(elapsed * 2.2 + p.phase);
-        ctx.save();
-        ctx.translate(p.x, p.y);
-        ctx.rotate(p.rot);
-        ctx.scale(1, flutter);
-        ctx.fillStyle =
-          p.tint === 'gold'
-            ? 'rgba(254, 240, 138, 0.88)'
-            : p.tint === 'pink'
-              ? 'rgba(249, 168, 212, 0.92)'
-              : 'rgba(252, 231, 243, 0.92)';
-        ctx.beginPath();
-        ctx.moveTo(-p.rx, 0);
-        ctx.quadraticCurveTo(0, -p.ry * 1.5, p.rx, 0);
-        ctx.quadraticCurveTo(0, p.ry * 1.3, -p.rx, 0);
-        ctx.fill();
-        ctx.restore();
+        // 3. Drifting Sakura Cherry-Blossom Petals
+        for (const p of petals) {
+          p.x += (p.vx + Math.sin(elapsed * 1.1 + p.phase) * 9) * dt;
+          p.y += (p.vy + Math.cos(elapsed * 1.4 + p.phase) * 4) * dt;
+          p.rot += p.vrot * dt;
+
+          if (p.x > W + 12) p.x = -10;
+          if (p.y > H + 12) {
+            p.y = -10;
+            p.x = Math.random() * W;
+          }
+
+          const flutter = 0.55 + 0.45 * Math.sin(elapsed * 2.2 + p.phase);
+          ctx.save();
+          ctx.translate(p.x, p.y);
+          ctx.rotate(p.rot);
+          ctx.scale(1, flutter);
+          ctx.fillStyle =
+            p.tint === 'gold'
+              ? 'rgba(254, 240, 138, 0.88)'
+              : p.tint === 'pink'
+                ? 'rgba(249, 168, 212, 0.92)'
+                : 'rgba(252, 231, 243, 0.92)';
+          ctx.beginPath();
+          ctx.moveTo(-p.rx, 0);
+          ctx.quadraticCurveTo(0, -p.ry * 1.5, p.rx, 0);
+          ctx.quadraticCurveTo(0, p.ry * 1.3, -p.rx, 0);
+          ctx.fill();
+          ctx.restore();
+        }
       }
     };
 
@@ -365,7 +396,7 @@ export function LivingFarmEffects({
 
     rafId = window.requestAnimationFrame(tick);
     return () => window.cancelAnimationFrame(rafId);
-  }, [boosterActive, coverBox, effectivePaused, prefersReducedMotion]);
+  }, [boosterActive, coverBox, effectivePaused, prefersReducedMotion, weatherEffectsEnabled]);
 
   return (
     <div
@@ -516,6 +547,66 @@ export function LivingFarmEffects({
             ref={canvasRef}
             className="will-change-transform absolute inset-0 w-full h-full pointer-events-none"
           />
+
+          {/* 4b. CSS-Keyframe Subtle Meadow Weather Effects: Floating Pollen & Falling Leaves */}
+          {weatherEffectsEnabled && !prefersReducedMotion && (
+            <div
+              data-testid="meadow-weather-effects"
+              aria-hidden="true"
+              className="pointer-events-none absolute inset-0 overflow-hidden"
+            >
+              {CSS_POLLEN_SPECS.map((mote, idx) => (
+                <span
+                  key={`weather-pollen-${idx}`}
+                  style={{
+                    left: mote.left,
+                    top: mote.top,
+                    width: `${mote.size}px`,
+                    height: `${mote.size}px`,
+                    animationDelay: mote.delay,
+                    animationDuration: mote.duration,
+                  }}
+                  className={`animate-weather-pollen absolute rounded-full ${
+                    boosterActive || mote.tint === 'mint'
+                      ? 'bg-emerald-200/85 shadow-[0_0_8px_rgba(110,231,183,0.75)]'
+                      : mote.tint === 'cream'
+                        ? 'bg-amber-50/90 shadow-[0_0_7px_rgba(255,251,235,0.8)]'
+                        : 'bg-yellow-200/85 shadow-[0_0_8px_rgba(253,224,71,0.75)]'
+                  }`}
+                />
+              ))}
+              {CSS_LEAF_SPECS.map((leaf, idx) => (
+                <svg
+                  key={`weather-leaf-${idx}`}
+                  viewBox="0 0 16 12"
+                  style={{
+                    left: leaf.left,
+                    top: leaf.top,
+                    width: `${leaf.size}px`,
+                    height: `${Math.round(leaf.size * 0.78)}px`,
+                    animationDelay: leaf.delay,
+                    animationDuration: leaf.duration,
+                  }}
+                  className="animate-weather-leaf absolute drop-shadow-[0_1px_2px_rgba(45,30,24,0.28)]"
+                >
+                  <path
+                    d="M1 6 C4 1, 11 1, 15 6 C11 11, 4 11, 1 6 Z"
+                    fill={leaf.fill}
+                    fillOpacity="0.82"
+                    stroke="rgba(45,30,24,0.24)"
+                    strokeWidth="0.7"
+                  />
+                  <path
+                    d="M2.5 6 Q8 5.2 13.5 6"
+                    fill="none"
+                    stroke="rgba(255,255,255,0.55)"
+                    strokeWidth="0.7"
+                    strokeLinecap="round"
+                  />
+                </svg>
+              ))}
+            </div>
+          )}
 
           {/* 5. Active Auto-Harvest Drone patrolling smoothly above the clover pasture */}
           {droneActive && !prefersReducedMotion && (

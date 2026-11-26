@@ -12,6 +12,7 @@ import {
   calculateProductionRate,
   calculateTotalChickens,
   CHICKEN_MILESTONES,
+  CHICKEN_PACKS,
   type ChickenMilestoneInfo,
   COOP_FEVER_MULTIPLIER,
   COOP_FEVER_REQUIRED_ADS,
@@ -38,6 +39,7 @@ import {
   EggIcon,
   IncubatorNestEggSprite,
 } from './GameIcons';
+import { ChibiFarmMascot, type ChibiMascotReaction } from './ChibiFarmMascot';
 import { LivingFarmEffects } from './LivingFarmEffects';
 
 interface FarmMeadowProps {
@@ -47,6 +49,7 @@ interface FarmMeadowProps {
   economyConfig?: Partial<EconomyConfig> | null;
   isVisible?: boolean;
   isProfileSynced?: boolean;
+  weatherEffectsEnabled?: boolean;
   onCollect: () => void;
   onOpenYourFarm: () => void;
   onOpenWithdraw?: () => void;
@@ -172,6 +175,7 @@ export function FarmMeadow({
   economyConfig,
   isVisible = true,
   isProfileSynced = true,
+  weatherEffectsEnabled = true,
   onCollect,
   onOpenYourFarm,
   onOpenWithdraw,
@@ -214,6 +218,9 @@ export function FarmMeadow({
   const [poppedHen, setPoppedHen] = useState<{ id: string; seq: number } | null>(null);
   const [activeMilestone, setActiveMilestone] = useState<ChickenMilestoneInfo | null>(null);
   const [entranceEpoch, setEntranceEpoch] = useState(0);
+  const [mascotReaction, setMascotReaction] = useState<ChibiMascotReaction>('idle');
+  const [mascotSeq, setMascotSeq] = useState(0);
+  const [mascotLabel, setMascotLabel] = useState<string | null>(null);
 
   const [isInViewport, setIsInViewport] = useState(true);
   const [isDocVisible, setIsDocVisible] = useState(
@@ -233,7 +240,19 @@ export function FarmMeadow({
   const collectPopTimerRef = useRef<number | null>(null);
   const collectCheerTimerRef = useRef<number | null>(null);
   const harvestTimerRef = useRef<number | null>(null);
+  const mascotTimerRef = useRef<number | null>(null);
   const effectTimersRef = useRef<number[]>([]);
+
+  const triggerMascotReaction = (kind: Exclude<ChibiMascotReaction, 'idle'>, label: string) => {
+    setMascotReaction(kind);
+    setMascotSeq((s) => s + 1);
+    setMascotLabel(label);
+    if (mascotTimerRef.current) window.clearTimeout(mascotTimerRef.current);
+    mascotTimerRef.current = window.setTimeout(() => {
+      setMascotReaction('idle');
+      setMascotLabel(null);
+    }, 2000);
+  };
 
   useEffect(() => {
     if (isVisible && !prevVisibleRef.current) {
@@ -321,6 +340,10 @@ export function FarmMeadow({
     const batchSeq = ++particleBatchSeqRef.current;
     if (kind === 'chicken_buy') {
       setChickenPurchaseBanner({ seq: batchSeq, addedCount: countAdded });
+      triggerMascotReaction(
+        'buy',
+        `Welcome +${countAdded} ${countAdded === 1 ? 'Hen' : 'Hens'}!`,
+      );
       const bannerTimer = window.setTimeout(() => {
         setChickenPurchaseBanner((cur) => (cur?.seq === batchSeq ? null : cur));
       }, 1500);
@@ -468,6 +491,7 @@ export function FarmMeadow({
       if (collectPopTimerRef.current) window.clearTimeout(collectPopTimerRef.current);
       if (collectCheerTimerRef.current) window.clearTimeout(collectCheerTimerRef.current);
       if (harvestTimerRef.current) window.clearTimeout(harvestTimerRef.current);
+      if (mascotTimerRef.current) window.clearTimeout(mascotTimerRef.current);
       for (const timerId of effectTimersRef.current) {
         window.clearTimeout(timerId);
       }
@@ -497,6 +521,7 @@ export function FarmMeadow({
     }, 1500);
 
     spawnMeadowParticleBurst('egg_collect', 1);
+    triggerMascotReaction('collect', `+${safeAmount.toLocaleString()} Eggs!`);
     triggerCollectPressFeedback();
     setCollectCheerSeq((s) => s + 1);
     if (collectCheerTimerRef.current) window.clearTimeout(collectCheerTimerRef.current);
@@ -631,6 +656,7 @@ export function FarmMeadow({
         boosterActive={boosterActive}
         droneActive={droneActive}
         isPaused={!isFarmActive}
+        weatherEffectsEnabled={weatherEffectsEnabled}
       >
         {/* Animated Roaming Chickens placed strictly on the lawn around the coops */}
         <div className="absolute inset-0 z-10 pointer-events-none">
@@ -638,6 +664,7 @@ export function FarmMeadow({
           const isPopping = poppedHen?.id === hen.id;
           const isGoldenTarget = goldenReady && Boolean(onGoldenEggDrop) && idx === 0;
           const depthScale = Number((0.68 + ((hen.y - 40) / 26) * 0.24).toFixed(3));
+          const packInfo = CHICKEN_PACKS.find((p) => p.id === hen.breed);
           return (
             <button
               key={hen.id}
@@ -679,8 +706,21 @@ export function FarmMeadow({
                 transform: `translate(-50%, -50%) scale(${depthScale})`,
                 transition: 'left 2.6s ease-in-out, top 2.6s ease-in-out, transform 2.6s ease-in-out',
               }}
-              className="group absolute p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 rounded-full pointer-events-auto"
+              className="group absolute p-1 cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-pink-300 rounded-full pointer-events-auto"
             >
+              {/* Subtle Kawaii Pastel Hover Ring */}
+              <span
+                aria-hidden="true"
+                className="pointer-events-none absolute -inset-1 rounded-full bg-pink-200/35 ring-2 ring-pink-300/60 opacity-0 scale-75 transition-all duration-200 group-hover:opacity-100 group-hover:scale-100 group-focus-visible:opacity-100 group-focus-visible:scale-100"
+              />
+              {packInfo && (
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute -bottom-5 left-1/2 -translate-x-1/2 rounded-full bg-[#FFFDFB]/95 border border-pink-300 px-2 py-0.5 text-[9px] font-extrabold text-stone-800 whitespace-nowrap shadow-md opacity-0 translate-y-1 transition-all duration-200 group-hover:opacity-100 group-hover:translate-y-0 group-focus-visible:opacity-100 group-focus-visible:translate-y-0"
+                >
+                  {packInfo.name} · {packInfo.eggsPerHour}/h
+                </span>
+              )}
               {isGoldenTarget && (
                 <>
                   <span
@@ -724,7 +764,13 @@ export function FarmMeadow({
                     {c.text}
                   </span>
                 ))}
-              <div className="relative transition-transform duration-200 ease-out group-hover:scale-110 group-hover:-translate-y-1 group-active:scale-95">
+              <motion.div
+                key={`hen-enter-${hen.id}-${entranceEpoch}`}
+                initial={prefersReducedMotion ? false : { opacity: 0, scale: 0.65, y: 12 }}
+                animate={{ opacity: 1, scale: 1, y: 0 }}
+                transition={{ duration: 0.34, delay: Math.min(idx, 10) * 0.04, ease: [0.22, 1, 0.36, 1] }}
+                className="relative transition-transform duration-200 ease-out group-hover:scale-115 group-hover:-translate-y-1.5 group-hover:-rotate-3 group-active:scale-95"
+              >
                 <span
                   aria-hidden="true"
                   className="pointer-events-none absolute bottom-0 left-1/2 -translate-x-1/2 w-12 h-3 rounded-full bg-stone-950/45 blur-[3px]"
@@ -739,12 +785,12 @@ export function FarmMeadow({
                   >
                     <ChickenSprite
                       breed={hen.breed}
-                      className="w-16 h-16 sm:w-[4.4rem] sm:h-[4.4rem] drop-shadow-[0_6px_10px_rgba(12,18,10,0.42)] group-hover:drop-shadow-[0_10px_15px_rgba(12,18,10,0.52)] transition-all duration-200"
+                      className="w-16 h-16 sm:w-[4.4rem] sm:h-[4.4rem] drop-shadow-[0_6px_10px_rgba(12,18,10,0.42)] group-hover:drop-shadow-[0_10px_15px_rgba(244,114,182,0.52)] transition-all duration-200"
                       facingLeft={hen.facingLeft}
                     />
                   </div>
                 </div>
-              </div>
+              </motion.div>
             </button>
           );
         })}
@@ -1222,6 +1268,26 @@ export function FarmMeadow({
         </AnimatePresence>
       </div>
 
+      {/* Floating Chibi Anime Farm Mascot (Reacts on Egg Collection & Chicken Purchases) */}
+      <motion.div
+        key={`chibi-mascot-stage-${entranceEpoch}`}
+        initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 14, scale: 0.85 }}
+        animate={{ opacity: 1, y: 0, scale: 1 }}
+        transition={{ duration: 0.36, delay: 0.12, ease: [0.22, 1, 0.36, 1] }}
+        className="pointer-events-none absolute left-2.5 bottom-[12.1rem] lg:bottom-[8.2rem] z-[22]"
+      >
+        <ChibiFarmMascot
+          reaction={mascotReaction}
+          reactionSeq={mascotSeq}
+          reactionLabel={mascotLabel}
+          isPaused={!isFarmActive}
+          onTap={() => {
+            onChickenTap();
+            triggerMascotReaction('collect', 'Happy Farming!');
+          }}
+        />
+      </motion.div>
+
       {/* Bottom Action Dock (floats cleanly above mobile BottomNav) */}
       <div className="absolute inset-x-3 bottom-[4.85rem] lg:bottom-3 z-20 flex flex-col gap-2">
         {/* Egg Incubator / Hatchery Compact Dock */}
@@ -1334,10 +1400,10 @@ export function FarmMeadow({
             onClick={onOpenYourFarm}
             initial={prefersReducedMotion ? { opacity: 0 } : { opacity: 0, y: 12, scale: 0.96 }}
             animate={{ opacity: 1, y: 0, scale: 1 }}
-            whileHover={!prefersReducedMotion ? { y: -2, scale: 1.015 } : undefined}
+            whileHover={!prefersReducedMotion ? { y: -3, scale: 1.02 } : undefined}
             whileTap={!prefersReducedMotion ? { scale: 0.97 } : undefined}
             transition={{ duration: 0.3, delay: 0.05, ease: [0.22, 1, 0.36, 1] }}
-            className="clay-btn clay-card !rounded-2xl flex-1 min-h-[56px] px-3 py-2 flex items-center gap-2.5 text-left"
+            className="clay-btn clay-card hover:border-pink-400/80 dark:hover:border-pink-400/70 hover:shadow-[0_6px_18px_rgba(244,114,182,0.22)] !rounded-2xl flex-1 min-h-[56px] px-3 py-2 flex items-center gap-2.5 text-left"
           >
             <div className="w-9 h-9 rounded-xl clay-icon-well flex items-center justify-center shrink-0">
               <EggIcon className="w-5 h-5" />

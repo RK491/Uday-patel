@@ -1930,14 +1930,14 @@ export function TasksView({
       {/* + Add Paid Task Modal (Step 1: Details + Coins -> Next | Step 2: Fee & Slots Preview -> OK) */}
       {showAddModal && (
         <div
-          className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4 overflow-y-auto"
+          className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/55 dark:bg-[#0D0B18]/78 backdrop-blur-xs p-4 overflow-y-auto"
           role="dialog"
           aria-modal="true"
           aria-labelledby="add-task-modal-title"
         >
           <form
             onSubmit={(e) => void handleCreateTaskSubmit(e)}
-            className="animate-clay-modal clay-card w-full max-w-md p-5 space-y-3.5 my-auto"
+            className="animate-anime-pop kawaii-modal w-full max-w-md p-5 space-y-3.5 my-auto"
           >
             <div className="flex items-center justify-between gap-2">
               <div>
@@ -1956,7 +1956,7 @@ export function TasksView({
                 type="button"
                 onClick={closeAddModal}
                 aria-label="Close add task modal"
-                className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+                className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -2334,15 +2334,15 @@ export function TasksView({
       {/* Sponsor "My Campaigns" Analytics + Top-Up / Refund Drawer */}
       {showCampaignsDrawer && (
         <div
-          className="animate-clay-backdrop fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/50 dark:bg-black/70 backdrop-blur-xs p-0 sm:p-4"
+          className="animate-clay-backdrop fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-0 sm:p-4"
           role="dialog"
           aria-modal="true"
           aria-labelledby="my-campaigns-title"
         >
-          <div className="animate-clay-modal clay-card w-full sm:max-w-md max-h-[88vh] rounded-t-3xl sm:rounded-3xl p-5 flex flex-col gap-4 overflow-hidden">
+          <div className="animate-anime-pop kawaii-modal w-full sm:max-w-md max-h-[88vh] !rounded-b-none sm:!rounded-[2rem] p-5 flex flex-col gap-4 overflow-hidden">
             <div className="flex items-center justify-between gap-2 shrink-0">
               <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-10 h-10 rounded-2xl clay-icon-well-sky flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0">
+                <div className="w-10 h-10 rounded-2xl clay-icon-well border-pink-300 dark:border-pink-400/50 flex items-center justify-center text-sky-600 dark:text-sky-400 shrink-0">
                   <BarChart3 className="w-5 h-5" />
                 </div>
                 <div className="min-w-0">
@@ -2361,7 +2361,7 @@ export function TasksView({
                   setTopUpTargetId(null);
                   setShowCampaignsDrawer(false);
                 }}
-                className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
+                className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
               >
                 <X className="w-4 h-4" />
               </button>

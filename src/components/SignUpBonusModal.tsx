@@ -87,8 +87,8 @@ export function SignUpBonusModal({ onClaim }: SignUpBonusModalProps) {
           </div>
 
           {/* Primary Reward Card */}
-          <div className="w-full clay-card p-5 space-y-3">
-            <div className="clay-card-mint !rounded-2xl px-5 py-4 flex items-center justify-between gap-3">
+          <div className="animate-anime-pop kawaii-modal w-full p-5 space-y-3">
+            <div className="kawaii-panel-mint px-5 py-4 flex items-center justify-between gap-3">
               <div className="flex items-center gap-3 text-left">
                 <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
                   <CoinIcon className="w-7 h-7" />

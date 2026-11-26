@@ -358,15 +358,15 @@ export function ChannelCheckModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-xs p-4"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/55 dark:bg-[#0D0B18]/78 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="channel-gate-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-md p-5 space-y-4">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-md p-5 space-y-4">
         <div className="flex items-start justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-11 h-11 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+            <div className="w-11 h-11 rounded-2xl clay-icon-well border-pink-300 dark:border-pink-400/50 flex items-center justify-center shrink-0">
               <Send className="w-5 h-5 text-sky-600 dark:text-sky-400" />
             </div>
             <div>
@@ -392,7 +392,7 @@ export function ChannelCheckModal({
               type="button"
               onClick={onClose}
               aria-label="Close channel check modal"
-              className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+              className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
             >
               <X className="w-4 h-4" />
             </button>

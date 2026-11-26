@@ -252,15 +252,15 @@ export function RewardedAdModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/65 backdrop-blur-xs p-4"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/55 dark:bg-[#0D0B18]/78 backdrop-blur-xs p-4"
       role="dialog"
       aria-modal="true"
       aria-labelledby="rewarded-ad-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-sm p-5 space-y-4">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-sm p-5 space-y-4">
         <div className="flex items-center justify-between gap-2">
-          <div className="clay-card-warm !rounded-xl inline-flex items-center gap-1.5 text-xs font-extrabold text-amber-800 dark:text-amber-300 px-3 py-1.5">
-            <Sparkles className="w-3.5 h-3.5" />
+          <div className="kawaii-panel-peach !rounded-2xl inline-flex items-center gap-1.5 text-xs font-extrabold text-rose-800 dark:text-pink-200 px-3 py-1.5">
+            <Sparkles className="w-3.5 h-3.5 text-pink-500 dark:text-pink-300" />
             <span>{badgeText}</span>
           </div>
           {!mandatory && (
@@ -269,16 +269,16 @@ export function RewardedAdModal({
               onClick={onClose}
               aria-label="Cancel ad without claiming"
               title="Closing early cancels the reward"
-              className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300"
+              className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300"
             >
               <X className="w-4 h-4" />
             </button>
           )}
         </div>
 
-        <div className="clay-card-mint !rounded-2xl p-4 text-center space-y-2.5">
+        <div className="kawaii-panel-mint p-4 text-center space-y-2.5">
           <div className="flex justify-center">
-            <div className="animate-clay-float w-20 h-20 rounded-2xl clay-icon-well p-1 flex items-center justify-center overflow-hidden">
+            <div className="animate-clay-float w-20 h-20 rounded-3xl clay-icon-well border-pink-300 dark:border-pink-400/50 p-1 flex items-center justify-center overflow-hidden">
               {actionKind === 'buy_chicken' && chickenBreed ? (
                 <ChickenSprite breed={chickenBreed} className="w-14 h-14" />
               ) : actionKind === 'incubator_speedup' ? (

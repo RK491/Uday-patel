@@ -221,10 +221,13 @@ import {
 import { isValidLanguageCode, LANGUAGE_OPTIONS, t } from '../utils/i18n';
 import {
   THEME_STORAGE_KEY,
+  WEATHER_EFFECTS_STORAGE_KEY,
   applyThemeToDocument,
   getStoredTheme,
+  getStoredWeatherEffectsEnabled,
   isValidThemeMode,
   setStoredTheme,
+  setStoredWeatherEffectsEnabled,
 } from '../utils/theme';
 import {
   buildPersonalReferralUrl,
@@ -4418,6 +4421,35 @@ test('resolveApiCandidateUrls respects normalized localStorage override and fall
       delete (globalThis as { localStorage?: Storage }).localStorage;
     } else {
       (globalThis as { localStorage?: Storage }).localStorage = prevStorage;
+    }
+  }
+});
+
+test('getStoredWeatherEffectsEnabled defaults to true and persists toggle updates', () => {
+  const prevWindow = (globalThis as { window?: unknown }).window;
+  const store = new Map<string, string>();
+  (globalThis as { window?: unknown }).window = {
+    localStorage: {
+      getItem: (key: string) => store.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        store.set(key, value);
+      },
+    },
+  };
+
+  try {
+    assert.equal(getStoredWeatherEffectsEnabled(), true);
+    setStoredWeatherEffectsEnabled(false);
+    assert.equal(store.get(WEATHER_EFFECTS_STORAGE_KEY), 'false');
+    assert.equal(getStoredWeatherEffectsEnabled(), false);
+    setStoredWeatherEffectsEnabled(true);
+    assert.equal(store.get(WEATHER_EFFECTS_STORAGE_KEY), 'true');
+    assert.equal(getStoredWeatherEffectsEnabled(), true);
+  } finally {
+    if (prevWindow === undefined) {
+      delete (globalThis as { window?: unknown }).window;
+    } else {
+      (globalThis as { window?: unknown }).window = prevWindow;
     }
   }
 });

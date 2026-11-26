@@ -76,15 +76,15 @@ export function HatcheryModal({
 
   return (
     <div
-      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/55 dark:bg-black/75 backdrop-blur-xs p-4 overflow-y-auto"
+      className="animate-clay-backdrop fixed inset-0 z-50 flex items-center justify-center bg-[#2B1B2E]/50 dark:bg-[#0D0B18]/75 backdrop-blur-xs p-4 overflow-y-auto"
       role="dialog"
       aria-modal="true"
       aria-labelledby="hatchery-modal-title"
     >
-      <div className="animate-clay-modal clay-card w-full max-w-md p-5 space-y-4 my-auto">
+      <div className="animate-anime-pop kawaii-modal w-full max-w-md p-5 space-y-4 my-auto">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5 min-w-0">
-            <div className="w-10 h-10 rounded-xl clay-icon-well-amber flex items-center justify-center shrink-0">
+            <div className="w-10 h-10 rounded-2xl clay-icon-well-amber flex items-center justify-center shrink-0">
               <IncubatorNestEggSprite
                 tier={status.tier?.id ?? 'golden'}
                 ready={status.status === 'ready'}
@@ -107,7 +107,7 @@ export function HatcheryModal({
             type="button"
             aria-label="Close incubator hatchery modal"
             onClick={onClose}
-            className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
+            className="clay-btn clay-btn-neutral w-9 h-9 rounded-full flex items-center justify-center text-stone-600 dark:text-stone-300 shrink-0"
           >
             <X className="w-4 h-4" />
           </button>
@@ -117,7 +117,7 @@ export function HatcheryModal({
           (() => {
             const pack = getChickenPack(hatchedReveal.breed);
             return (
-              <div className="clay-card-warm !rounded-2xl p-5 text-center space-y-3.5">
+              <div className="kawaii-panel-peach p-5 text-center space-y-3.5">
                 <div className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/15 border border-emerald-500/35 px-3 py-1 text-xs font-extrabold text-emerald-800 dark:text-emerald-300">
                   <Sparkles className="w-3.5 h-3.5" />
                   <span>New Hen Hatched!</span>
