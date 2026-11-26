@@ -116,6 +116,7 @@ import {
   getChickenMilestoneReached,
   getCoopFeverAdsWatched,
   getEffectiveAdminIds,
+  getHiddenDefaultTaskIds,
   getTaskChannelCheckMode,
   WITHDRAW_ADS_CRITERIA_DEDUCT_COUNT,
   WITHDRAW_ADS_DEDUCTION_RATE,
@@ -131,6 +132,7 @@ import {
   GOLDEN_EGG_REWARD_XP,
   gramToCoins,
   isAdminPlayerId,
+  isBuiltInTaskId,
   isFeedBoosterActive,
   isGoldenEggReady,
   isTelegramMemberStatusJoined,
@@ -148,6 +150,7 @@ import {
   parseAdConfigTemplate,
   PRIMARY_ADMIN_TELEGRAM_ID,
   REFERRAL_DEPOSIT_COMMISSION_RATE,
+  sanitizePlayerChannelError,
   REFERRAL_MILESTONE_CRATES,
   REFERRED_WELCOME_BONUS_COINS,
   REFERRER_LIFETIME_EGG_COMMISSION_RATE,
@@ -4452,4 +4455,60 @@ test('getStoredWeatherEffectsEnabled defaults to true and persists toggle update
       (globalThis as { window?: unknown }).window = prevWindow;
     }
   }
+});
+
+test('Admin built-in task removal hides default tasks cleanly without duplicating and blocks claiming removed tasks', () => {
+  const { profile } = createDefaultProfile('player_task_hide', 'Riya', '@riya', NOW);
+  const removedDefault = {
+    id: 'partner_app',
+    category: 'partner' as const,
+    title: 'Partner farm explorer',
+    rewardCoins: 300,
+    icon: 'link',
+    actionUrl: 'https://t.me/AIRDROP_GALAXYS',
+    isCustom: true,
+    isActive: false,
+    createdAtMs: NOW,
+  };
+
+  assert.equal(isBuiltInTaskId('partner_app'), true);
+  assert.equal(isBuiltInTaskId('task_custom_123'), false);
+
+  const hiddenIds = getHiddenDefaultTaskIds([removedDefault]);
+  assert.equal(hiddenIds.has('partner_app'), true);
+
+  const mergedHidden = mergeTaskDefinitions([removedDefault]);
+  assert.equal(mergedHidden.some((t) => t.id === 'partner_app'), false);
+
+  const blockedClaim = completeTask(profile, 'partner_app', NOW + 1000, [removedDefault]);
+  assert.ok('error' in blockedClaim);
+
+  const mergedRestored = mergeTaskDefinitions([]);
+  assert.equal(mergedRestored.filter((t) => t.id === 'partner_app').length, 1);
+
+  const restoredClaim = completeTask(profile, 'partner_app', NOW + 1000, []);
+  assert.ok(!('error' in restoredClaim));
+});
+
+test('sanitizePlayerChannelError hides internal bot_token and server jargon from players', () => {
+  assert.equal(
+    sanitizePlayerChannelError('TELEGRAM_BOT_TOKEN not configured on server', 'bot_unconfigured'),
+    undefined,
+  );
+  assert.equal(
+    sanitizePlayerChannelError('TELEGRAM_BOT_TOKEN not configured on server', 'api_error'),
+    'Verification temporarily unavailable — tap Join, then Check Channels.',
+  );
+  assert.equal(
+    sanitizePlayerChannelError('Bot verification not configured on server', 'unknown'),
+    undefined,
+  );
+  assert.equal(
+    sanitizePlayerChannelError('No Telegram user ID', 'no_telegram_user'),
+    undefined,
+  );
+  assert.equal(
+    sanitizePlayerChannelError('User is not a member of the chat', 'left'),
+    'User is not a member of the chat',
+  );
 });

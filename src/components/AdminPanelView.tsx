@@ -104,10 +104,12 @@ import {
   generateGiftCodeString,
   getActiveReinvestSurgeStatus,
   getEffectiveAdminIds,
+  getHiddenDefaultTaskIds,
   getTaskChannelCheckMode,
   getUnifiedUserId,
   getWithdrawalStatusMeta,
   isAdminPlayerId,
+  isBuiltInTaskId,
   isVerifiableTelegramChannelUrl,
   matchesAdminRecord,
   matchesBannedUserRecord,
@@ -124,6 +126,7 @@ import {
   resolveReinvestSurge,
   resolveTaskPricingConfig,
   sanitizeExternalUrl,
+  TASK_DEFINITIONS,
 } from '../game/economy';
 import {
   getApiBaseUrlDiagnostics,
@@ -228,6 +231,7 @@ interface AdminPanelViewProps {
   }) => Promise<void>;
   onToggleTask: (taskId: string, isActive: boolean) => Promise<void>;
   onDeleteTask: (taskId: string) => Promise<void>;
+  onToggleDefaultTaskHidden?: (task: TaskDefinition, hide: boolean) => Promise<void>;
   onSaveAdConfig: (config: Omit<AdConfig, 'updatedAtMs'>) => Promise<boolean | void>;
   onSaveChannelsConfig: (config: Omit<ChannelsConfig, 'updatedAtMs'>) => Promise<boolean | void>;
   onSyncChannels?: (payload?: {
@@ -469,6 +473,7 @@ export function AdminPanelView({
   onCreateTask,
   onToggleTask,
   onDeleteTask,
+  onToggleDefaultTaskHidden,
   onSaveAdConfig,
   onSaveChannelsConfig,
   onSyncChannels,
@@ -1266,9 +1271,18 @@ export function AdminPanelView({
     () => pendingRequests.reduce((sum, r) => sum + (Number(r.gramAmount) || 0), 0),
     [pendingRequests],
   );
-  const activeTaskCount = useMemo(
-    () => customTasks.filter((t) => t.isActive !== false).length,
+  const adminCustomTasks = useMemo(
+    () => customTasks.filter((t) => !isBuiltInTaskId(t.id)),
     [customTasks],
+  );
+  const hiddenDefaultTaskIds = useMemo(
+    () => getHiddenDefaultTaskIds(customTasks),
+    [customTasks],
+  );
+  const [busyTaskId, setBusyTaskId] = useState<string | null>(null);
+  const activeTaskCount = useMemo(
+    () => adminCustomTasks.filter((t) => t.isActive !== false).length,
+    [adminCustomTasks],
   );
 
   const activePromoCount = useMemo(() => {
@@ -7004,22 +7018,23 @@ export function AdminPanelView({
           <div className="clay-card overflow-hidden">
             <div className="px-4 py-3 border-b border-stone-200/70 dark:border-stone-800 flex items-center justify-between">
               <h3 className="text-xs font-extrabold uppercase tracking-wider text-stone-600 dark:text-stone-300">
-                Custom Task Catalog ({customTasks.length})
+                Custom Task Catalog ({adminCustomTasks.length})
               </h3>
               <span className="text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
                 {activeTaskCount} active
               </span>
             </div>
 
-            {customTasks.length === 0 ? (
+            {adminCustomTasks.length === 0 ? (
               <div className="p-6 text-center text-xs text-stone-500 dark:text-stone-400">
                 No custom tasks added yet. Publish one above to show it live in the Tasks tab.
               </div>
             ) : (
               <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
-                {customTasks.map((task) => {
+                {adminCustomTasks.map((task) => {
                   const active = task.isActive !== false;
                   const isVerifiedCheck = getTaskChannelCheckMode(task) !== 'none';
+                  const isBusy = busyTaskId === task.id;
                   return (
                     <div key={task.id} className="p-3.5 flex items-center justify-between gap-3">
                       <div className="flex items-center gap-3 min-w-0">
@@ -7054,12 +7069,15 @@ export function AdminPanelView({
                       <div className="flex items-center gap-1.5 shrink-0">
                         <button
                           type="button"
+                          disabled={isBusy}
                           onClick={() => {
                             if (!requireStrictAdminAuth('updating tasks')) return;
-                            void onToggleTask(task.id, !active);
+                            onTabTap?.();
+                            setBusyTaskId(task.id);
+                            void onToggleTask(task.id, !active).finally(() => setBusyTaskId(null));
                           }}
                           aria-label={active ? 'Pause task' : 'Resume task'}
-                          className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center"
+                          className="clay-btn clay-btn-neutral w-9 h-9 rounded-xl flex items-center justify-center disabled:opacity-50"
                         >
                           {active ? (
                             <PauseCircle className="w-4 h-4 text-amber-600 dark:text-amber-400" />
@@ -7069,14 +7087,22 @@ export function AdminPanelView({
                         </button>
                         <button
                           type="button"
+                          disabled={isBusy}
                           onClick={() => {
                             if (!requireStrictAdminAuth('deleting tasks')) return;
-                            void onDeleteTask(task.id);
+                            onTabTap?.();
+                            setBusyTaskId(task.id);
+                            void onDeleteTask(task.id).finally(() => setBusyTaskId(null));
                           }}
-                          aria-label="Delete task"
-                          className="w-9 h-9 rounded-xl bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-950/80 text-rose-600 dark:text-rose-400 flex items-center justify-center cursor-pointer transition-colors"
+                          aria-label={`Remove ${task.title}`}
+                          className="h-9 px-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-950/80 border border-rose-200 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-[11px] font-extrabold inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
                         >
-                          <Trash2 className="w-4 h-4" />
+                          {isBusy ? (
+                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="w-3.5 h-3.5" />
+                          )}
+                          <span>Remove</span>
                         </button>
                       </div>
                     </div>
@@ -7085,6 +7111,137 @@ export function AdminPanelView({
               </div>
             )}
           </div>
+
+          {onToggleDefaultTaskHidden && (
+            <div className="clay-card overflow-hidden">
+              <div className="px-4 py-3 border-b border-stone-200/70 dark:border-stone-800 flex items-center justify-between gap-2">
+                <div>
+                  <h3 className="text-xs font-extrabold uppercase tracking-wider text-stone-600 dark:text-stone-300">
+                    Built-in Tasks ({TASK_DEFINITIONS.length})
+                  </h3>
+                  <p className="text-[11px] text-stone-500 dark:text-stone-400">
+                    Remove unwanted default tasks from player Tasks tab or restore anytime
+                  </p>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <span className="text-[11px] font-mono-num text-stone-500 dark:text-stone-400">
+                    {TASK_DEFINITIONS.length - hiddenDefaultTaskIds.size} live
+                    {hiddenDefaultTaskIds.size > 0 ? ` · ${hiddenDefaultTaskIds.size} removed` : ''}
+                  </span>
+                  {hiddenDefaultTaskIds.size > 0 && (
+                    <button
+                      type="button"
+                      disabled={busyTaskId !== null}
+                      onClick={() => {
+                        if (!requireStrictAdminAuth('restoring default tasks')) return;
+                        onTabTap?.();
+                        setBusyTaskId('restore_all_defaults');
+                        void Promise.all(
+                          TASK_DEFINITIONS.filter((t) => hiddenDefaultTaskIds.has(t.id)).map((t) =>
+                            onToggleDefaultTaskHidden(t, false),
+                          ),
+                        ).finally(() => setBusyTaskId(null));
+                      }}
+                      className="clay-btn clay-btn-emerald min-h-[30px] px-2.5 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 disabled:opacity-50"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      <span>Restore All</span>
+                    </button>
+                  )}
+                </div>
+              </div>
+
+              <div className="divide-y divide-stone-100 dark:divide-stone-800/80">
+                {TASK_DEFINITIONS.map((task) => {
+                  const isRemoved = hiddenDefaultTaskIds.has(task.id);
+                  const isBusy = busyTaskId === task.id || busyTaskId === 'restore_all_defaults';
+                  return (
+                    <div
+                      key={task.id}
+                      className={`p-3.5 flex items-center justify-between gap-3 ${
+                        isRemoved ? 'bg-stone-50/70 dark:bg-stone-900/40 opacity-75' : ''
+                      }`}
+                    >
+                      <div className="flex items-center gap-3 min-w-0">
+                        <div className="w-10 h-10 rounded-2xl clay-icon-well flex items-center justify-center shrink-0">
+                          {renderPreviewIcon(task.icon)}
+                        </div>
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span
+                              className={`text-sm font-extrabold truncate ${
+                                isRemoved
+                                  ? 'line-through text-stone-500 dark:text-stone-400'
+                                  : 'text-stone-900 dark:text-stone-100'
+                              }`}
+                            >
+                              {task.title}
+                            </span>
+                            {isRemoved && (
+                              <span className="px-1.5 py-0.5 rounded-md bg-rose-50 dark:bg-rose-950/60 border border-rose-200 dark:border-rose-800/70 text-[10px] font-bold text-rose-700 dark:text-rose-300 shrink-0">
+                                Removed
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-stone-500 dark:text-stone-400 font-mono-num truncate">
+                            {task.category} · +{task.rewardCoins.toLocaleString()} coins
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        {isRemoved ? (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => {
+                              if (!requireStrictAdminAuth('restoring tasks')) return;
+                              onTabTap?.();
+                              setBusyTaskId(task.id);
+                              void onToggleDefaultTaskHidden(task, false).finally(() =>
+                                setBusyTaskId(null),
+                              );
+                            }}
+                            aria-label={`Restore ${task.title}`}
+                            className="clay-btn clay-btn-emerald h-9 px-2.5 rounded-xl text-[11px] font-extrabold inline-flex items-center gap-1 disabled:opacity-50"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            )}
+                            <span>Restore</span>
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={isBusy}
+                            onClick={() => {
+                              if (!requireStrictAdminAuth('removing tasks')) return;
+                              onTabTap?.();
+                              setBusyTaskId(task.id);
+                              void onToggleDefaultTaskHidden(task, true).finally(() =>
+                                setBusyTaskId(null),
+                              );
+                            }}
+                            aria-label={`Remove ${task.title}`}
+                            className="h-9 px-2.5 rounded-xl bg-rose-50 dark:bg-rose-950/50 hover:bg-rose-100 dark:hover:bg-rose-950/80 border border-rose-200 dark:border-rose-800/60 text-rose-600 dark:text-rose-400 text-[11px] font-extrabold inline-flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-50"
+                          >
+                            {isBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Trash2 className="w-3.5 h-3.5" />
+                            )}
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
 

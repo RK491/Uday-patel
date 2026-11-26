@@ -90,6 +90,7 @@ import {
   resolveLiveTaskChannelLinks,
   resolveMaintenanceConfig,
   resolveTaskPricingConfig,
+  sanitizePlayerChannelError,
   shouldShowSignUpBonusClaim,
   SIGNUP_BONUS_COINS,
   speedUpIncubationWithAd,
@@ -143,6 +144,7 @@ import {
   saveWithdrawApproveTemplateInFirestore,
   searchUsersInFirestore,
   setCachedLiveEconomyConfig,
+  setDefaultTaskHiddenInFirestore,
   setStoredGoldenEggClaimAtMs,
   subscribeToAdConfig,
   subscribeToAdminsConfig,
@@ -2606,8 +2608,11 @@ export default function App() {
             const apiErrorCh = data.channels.find(
               (c) => !c.joined && (c.status === 'api_error' || c.status === 'network_error') && c.error,
             );
-            if (apiErrorCh) {
-              setChannelCheckError(`${apiErrorCh.handle}: ${apiErrorCh.error}`);
+            const safeApiErr = apiErrorCh
+              ? sanitizePlayerChannelError(apiErrorCh.error, apiErrorCh.status)
+              : undefined;
+            if (apiErrorCh && safeApiErr) {
+              setChannelCheckError(`${apiErrorCh.handle}: ${safeApiErr}`);
             }
             const missing = data.channels
               .filter((c) => !c.joined)
@@ -2615,8 +2620,8 @@ export default function App() {
               .join(' & ');
             if (!opts?.silent) {
               triggerHapticFeedback('warning');
-              if (apiErrorCh) {
-                showToast(`${apiErrorCh.handle}: ${apiErrorCh.error}`);
+              if (apiErrorCh && safeApiErr) {
+                showToast(`${apiErrorCh.handle}: ${safeApiErr}`);
               } else {
                 showToast(`Join required: ${missing || formatChannelsHandleSummary(activeRequiredChannels)}`);
               }
@@ -2627,9 +2632,9 @@ export default function App() {
             triggerHapticFeedback('warning');
             showToast('Open this Mini App inside your Telegram Bot to verify your membership.');
           } else if (data.verificationMode === 'static_preview') {
-            showToast('Static preview host: open via Bot server or add Bot Token in Admin Panel.');
+            showToast('Open inside your Telegram Bot to verify channel membership.');
           } else {
-            showToast('Bot verification pending TELEGRAM_BOT_TOKEN on server.');
+            showToast('Channel verification is temporarily unavailable. Please try again shortly.');
           }
         }
 
@@ -2815,7 +2820,7 @@ export default function App() {
           }
           if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
           const reason =
-            'Live verification server unreachable on this preview URL. Open from your Bot Mini App server or set Backend Server URL in Admin Panel.';
+            'Channel verification is temporarily unavailable. Please open inside your Telegram Bot and try again.';
           triggerHapticFeedback('warning');
           showToast(reason);
           return {
@@ -2828,7 +2833,9 @@ export default function App() {
 
         if (data?.status === 'bot_unconfigured') {
           if (options?.taskId) delete verifiedChannelTaskProofRef.current[options.taskId];
-          const reason = data?.reason || 'Backend Bot verification is unavailable right now.';
+          const reason =
+            sanitizePlayerChannelError(data?.reason, 'bot_unconfigured') ||
+            'Channel verification is temporarily unavailable right now.';
           triggerHapticFeedback('warning');
           showToast(reason);
           return {
@@ -3862,9 +3869,31 @@ export default function App() {
   const handleDeleteCustomTask = async (taskId: string) => {
     try {
       await deleteCustomTaskInFirestore(taskId);
-      showToast('Task deleted.');
+      setCustomTasks((prev) => prev.filter((t) => t.id !== taskId));
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast('Task removed from Tasks tab.');
     } catch (err) {
       showToast(formatSyncErrorMessage(err, 'Failed to delete task.'));
+    }
+  };
+
+  const handleToggleDefaultTaskHidden = async (task: TaskDefinition, hide: boolean) => {
+    try {
+      const tombstone = await setDefaultTaskHiddenInFirestore(task, hide);
+      setCustomTasks((prev) => {
+        const without = prev.filter((t) => t.id !== task.id);
+        return hide && tombstone ? [tombstone, ...without] : without;
+      });
+      playClaimSound(soundsEnabled);
+      triggerHapticFeedback('success');
+      showToast(
+        hide
+          ? `"${task.title}" removed from player Tasks tab.`
+          : `"${task.title}" restored to player Tasks tab!`,
+      );
+    } catch (err) {
+      showToast(formatSyncErrorMessage(err, 'Failed to update default task visibility.'));
     }
   };
 
@@ -6687,6 +6716,7 @@ export default function App() {
           onCreateTask={handleCreateCustomTask}
           onToggleTask={handleToggleCustomTask}
           onDeleteTask={handleDeleteCustomTask}
+          onToggleDefaultTaskHidden={handleToggleDefaultTaskHidden}
           onSaveAdConfig={handleSaveAdConfig}
           onSaveChannelsConfig={handleSaveChannelsConfig}
           onSyncChannels={handleSyncChannelsWithBot}

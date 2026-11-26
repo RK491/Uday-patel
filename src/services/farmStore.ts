@@ -2454,6 +2454,54 @@ export async function deleteCustomTaskInFirestore(taskId: string): Promise<void>
   }
 }
 
+export async function setDefaultTaskHiddenInFirestore(
+  task: TaskDefinition,
+  hide: boolean,
+): Promise<TaskDefinition | null> {
+  const ref = doc(db, 'tasks', task.id);
+  if (!hide) {
+    try {
+      await deleteDoc(ref);
+      return null;
+    } catch (error) {
+      handleFirestoreError(error, OperationType.DELETE, `tasks/${task.id}`);
+    }
+  }
+
+  const nowMs = Date.now();
+  const cleanTitle = task.title.trim().slice(0, 80) || task.id;
+  const cleanReward = Math.max(1, Math.min(1_000_000, Math.round(task.rewardCoins || 20)));
+  const cleanIcon = (task.icon || 'link').trim().slice(0, 24) || 'link';
+  const cleanUrl = (task.actionUrl || '').trim().slice(0, 256);
+
+  try {
+    const existing = await getDocFromServer(ref).catch(() => getDoc(ref));
+    if (existing.exists()) {
+      await updateDoc(ref, { isActive: false });
+    } else {
+      await setDoc(ref, {
+        id: task.id,
+        category: task.category,
+        title: cleanTitle,
+        rewardCoins: cleanReward,
+        icon: cleanIcon,
+        actionUrl: cleanUrl,
+        isActive: false,
+        createdAtMs: nowMs,
+        createdAt: serverTimestamp(),
+      });
+    }
+    return {
+      ...task,
+      isCustom: true,
+      isActive: false,
+      createdAtMs: nowMs,
+    };
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, `tasks/${task.id}`);
+  }
+}
+
 export function subscribeToAdConfig(onUpdate: (config: AdConfig) => void): () => void {
   return onSnapshot(
     doc(db, 'app_config', 'ads'),

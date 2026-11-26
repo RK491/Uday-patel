@@ -5040,7 +5040,6 @@ export async function createApiApp(): Promise<express.Express> {
         ...ch,
         joined: false,
         status: 'bot_unconfigured',
-        error: 'TELEGRAM_BOT_TOKEN not configured on server',
       }));
       recordChannelCheckDiagnosticLog({
         endpoint: 'check-channels',
@@ -5050,13 +5049,13 @@ export async function createApiApp(): Promise<express.Express> {
         allJoined: false,
         fromFirestore,
         botConfigured: false,
-        error: 'TELEGRAM_BOT_TOKEN not configured on server',
+        error: 'Bot verification temporarily unavailable (bot token not configured)',
         channels: channelsOut.map((c) => ({
           handle: c.handle,
           joined: false,
           status: c.status,
           rawTelegramOk: false,
-          rawDescription: c.error,
+          rawDescription: 'Bot token not configured',
         })),
       });
       res.json({

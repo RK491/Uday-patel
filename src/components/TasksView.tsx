@@ -914,11 +914,6 @@ export function TasksView({
                     Paid
                   </span>
                 )}
-                {hasChannelCheck && (
-                  <span className="rounded-md bg-sky-100/80 dark:bg-sky-950/60 border border-sky-300/70 dark:border-sky-800/60 px-1.5 py-0.5 text-[10px] font-extrabold text-sky-800 dark:text-sky-300 shrink-0">
-                    Live Sync
-                  </span>
-                )}
                 {surgeStatus?.isActive && (
                   <span className="rounded-md bg-amber-100/90 dark:bg-amber-950/70 border border-amber-300/80 dark:border-amber-700/60 px-1.5 py-0.5 text-[10px] font-extrabold text-amber-900 dark:text-amber-300 shrink-0 font-mono-num">
                     +{surgeStatus.bonusPercent}% Surge
@@ -1139,12 +1134,29 @@ export function TasksView({
     return { totalClicks, totalInvested };
   }, [myCampaigns]);
 
-  const FILTER_TABS: Array<{ id: FilterTab; label: string }> = [
-    { id: 'social', label: 'Social' },
-    { id: 'daily', label: 'Daily' },
-    { id: 'exclusive', label: 'Exclusive' },
-    { id: 'partner', label: 'Sponsors' },
-  ];
+  const visibleFilterTabs = useMemo(() => {
+    const tabs: Array<{ id: FilterTab; label: string }> = [];
+    if (socialTasks.length > 0) tabs.push({ id: 'social', label: 'Social' });
+    tabs.push({ id: 'daily', label: 'Daily' });
+    if (exclusiveTasks.length > 0) tabs.push({ id: 'exclusive', label: 'Exclusive' });
+    if (partnerTasks.length > 0) tabs.push({ id: 'partner', label: 'Sponsors' });
+    return tabs;
+  }, [socialTasks.length, exclusiveTasks.length, partnerTasks.length]);
+
+  useEffect(() => {
+    if (!visibleFilterTabs.some((t) => t.id === filterTab)) {
+      setFilterTab(visibleFilterTabs[0]?.id ?? 'daily');
+    }
+  }, [visibleFilterTabs, filterTab]);
+
+  const tabGridColsClass =
+    visibleFilterTabs.length <= 1
+      ? 'grid-cols-1'
+      : visibleFilterTabs.length === 2
+        ? 'grid-cols-2'
+        : visibleFilterTabs.length === 3
+          ? 'grid-cols-3'
+          : 'grid-cols-4';
 
   return (
     <div
@@ -1326,13 +1338,13 @@ export function TasksView({
         </form>
       </div>
 
-      {/* 4 Filter Categories: Social | Daily | Exclusive | Sponsors */}
+      {/* Dynamic Category Tabs (empty categories hidden automatically) */}
       <div
         role="tablist"
         aria-label="Task categories"
-        className="clay-inset !rounded-2xl grid grid-cols-4 gap-1 p-1.5"
+        className={`clay-inset !rounded-2xl grid ${tabGridColsClass} gap-1 p-1.5`}
       >
-        {FILTER_TABS.map((tab) => {
+        {visibleFilterTabs.map((tab) => {
           const isActive = filterTab === tab.id;
           const count = tabCounts[tab.id];
           return (
@@ -1400,8 +1412,8 @@ export function TasksView({
         </select>
       </div>
 
-      {/* SOCIAL TAB */}
-      {filterTab === 'social' && (
+      {/* SOCIAL TAB (hidden when empty) */}
+      {filterTab === 'social' && socialTasks.length > 0 && (
         <div key="tasks-tab-social" className="animate-clay-enter space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
@@ -1411,15 +1423,9 @@ export function TasksView({
               Join → Claim
             </span>
           </div>
-          {socialTasks.length === 0 ? (
-            <div className="clay-card p-6 text-center text-xs text-stone-500 dark:text-stone-400">
-              No social tasks yet. Tap + Add task above to create one.
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {socialTasks.map((task) => renderTaskCard(task))}
-            </div>
-          )}
+          <div className="space-y-2.5">
+            {socialTasks.map((task) => renderTaskCard(task))}
+          </div>
         </div>
       )}
 
@@ -1873,16 +1879,18 @@ export function TasksView({
             </div>
           </div>
 
-          {/* Every day tasks */}
-          <div className="space-y-2.5">
-            <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300 px-1">Every day</h3>
-            {dailyTasks.map((task) => renderTaskCard(task))}
-          </div>
+          {/* Every day tasks (hidden when empty) */}
+          {dailyTasks.length > 0 && (
+            <div className="space-y-2.5">
+              <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300 px-1">Every day</h3>
+              {dailyTasks.map((task) => renderTaskCard(task))}
+            </div>
+          )}
         </div>
       )}
 
-      {/* EXCLUSIVE TAB */}
-      {filterTab === 'exclusive' && (
+      {/* EXCLUSIVE TAB (hidden when empty) */}
+      {filterTab === 'exclusive' && exclusiveTasks.length > 0 && (
         <div key="tasks-tab-exclusive" className="animate-clay-enter space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
@@ -1892,20 +1900,14 @@ export function TasksView({
               Join → Claim
             </span>
           </div>
-          {exclusiveTasks.length === 0 ? (
-            <div className="clay-card p-6 text-center text-xs text-stone-500 dark:text-stone-400">
-              No exclusive tasks yet. Tap + Add task above to create one.
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {exclusiveTasks.map((task) => renderTaskCard(task))}
-            </div>
-          )}
+          <div className="space-y-2.5">
+            {exclusiveTasks.map((task) => renderTaskCard(task))}
+          </div>
         </div>
       )}
 
-      {/* SPONSORS TAB */}
-      {filterTab === 'partner' && (
+      {/* SPONSORS TAB (hidden when empty) */}
+      {filterTab === 'partner' && partnerTasks.length > 0 && (
         <div key="tasks-tab-partner" className="animate-clay-enter space-y-3">
           <div className="flex items-center justify-between px-1">
             <h3 className="text-sm font-extrabold text-stone-700 dark:text-stone-300">
@@ -1915,15 +1917,9 @@ export function TasksView({
               Join → Claim
             </span>
           </div>
-          {partnerTasks.length === 0 ? (
-            <div className="clay-card p-6 text-center text-xs text-stone-500 dark:text-stone-400">
-              No sponsors tasks yet. Tap + Add task above to create one.
-            </div>
-          ) : (
-            <div className="space-y-2.5">
-              {partnerTasks.map((task) => renderTaskCard(task))}
-            </div>
-          )}
+          <div className="space-y-2.5">
+            {partnerTasks.map((task) => renderTaskCard(task))}
+          </div>
         </div>
       )}
 

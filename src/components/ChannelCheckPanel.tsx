@@ -9,7 +9,12 @@ import {
   ShieldCheck,
   X,
 } from 'lucide-react';
-import { formatChannelsHandleSummary, REQUIRED_TELEGRAM_CHANNELS, sanitizeExternalUrl } from '../game/economy';
+import {
+  formatChannelsHandleSummary,
+  REQUIRED_TELEGRAM_CHANNELS,
+  sanitizeExternalUrl,
+  sanitizePlayerChannelError,
+} from '../game/economy';
 import type {
   ChannelVerificationItem,
   ChannelVerificationResult,
@@ -131,7 +136,7 @@ export function ChannelCheckCard({
       };
     }
     return {
-      label: mode === 'bot_unconfigured' ? 'Bot Setup Needed' : 'TG Check Ready',
+      label: mode === 'bot_unconfigured' ? 'Check Pending' : 'TG Check Ready',
       className:
         'bg-sky-50 dark:bg-sky-950/60 border-sky-200 dark:border-sky-800/70 text-sky-700 dark:text-sky-300',
     };
@@ -200,11 +205,14 @@ export function ChannelCheckCard({
                     {ch.handle}
                   </div>
                   <div className="text-[11px] text-stone-500 dark:text-stone-400 break-words">
-                    {ch.error && ch.status !== 'no_telegram_user'
-                      ? ch.error
-                      : isStrictTelegram && !isJoined
-                        ? 'Not joined yet — tap Join then Check Channels'
-                        : ch.title}
+                    {(() => {
+                      const safeErr = sanitizePlayerChannelError(ch.error, ch.status);
+                      if (safeErr) return safeErr;
+                      if (isStrictTelegram && !isJoined) {
+                        return 'Not joined yet — tap Join then Check Channels';
+                      }
+                      return ch.title;
+                    })()}
                   </div>
                 </div>
               </div>
@@ -238,17 +246,21 @@ export function ChannelCheckCard({
       </div>
 
 
-      {checkError && (
-        <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300 flex items-center justify-between gap-2">
-          <span className="min-w-0 break-words">
-            Membership check failed: {checkError}
-          </span>
-        </div>
-      )}
+      {(() => {
+        const safeCheckError = sanitizePlayerChannelError(checkError, 'api_error');
+        if (!safeCheckError) return null;
+        return (
+          <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300 flex items-center justify-between gap-2">
+            <span className="min-w-0 break-words">
+              Membership check failed: {safeCheckError}
+            </span>
+          </div>
+        );
+      })()}
 
       {verification && mode === 'bot_unconfigured' && (
         <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-          Server bot verification requires TELEGRAM_BOT_TOKEN and adding the bot as an Admin in {summaryHandles}.
+          Channel verification is temporarily unavailable right now. Join {summaryHandles} above, then tap Retry shortly.
         </div>
       )}
 
@@ -260,7 +272,7 @@ export function ChannelCheckCard({
 
       {verification && mode === 'static_preview' && (
         <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
-          Static preview host detected (no Node backend on this URL) — tap Join above or open from your Node backend / set Backend Server URL in Admin Panel for live membership verification.
+          Join {summaryHandles} above, then open inside your Telegram Bot and tap Check Channels to verify membership.
         </div>
       )}
 
@@ -418,11 +430,14 @@ export function ChannelCheckModal({
                       {ch.handle}
                     </div>
                     <div className="text-xs text-stone-500 dark:text-stone-400 break-words">
-                      {ch.error && ch.status !== 'no_telegram_user'
-                        ? ch.error
-                        : isStrictTelegram && !isJoined
-                          ? 'Not joined yet — tap Join then Check Channels'
-                          : ch.description}
+                      {(() => {
+                        const safeErr = sanitizePlayerChannelError(ch.error, ch.status);
+                        if (safeErr) return safeErr;
+                        if (isStrictTelegram && !isJoined) {
+                          return 'Not joined yet — tap Join then Check Channels';
+                        }
+                        return ch.description;
+                      })()}
                     </div>
                   </div>
                 </div>
@@ -446,15 +461,19 @@ export function ChannelCheckModal({
           })}
         </div>
 
-        {checkError && (
-          <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300">
-            Membership check failed: {checkError}
-          </div>
-        )}
+        {(() => {
+          const safeCheckError = sanitizePlayerChannelError(checkError, 'api_error');
+          if (!safeCheckError) return null;
+          return (
+            <div className="rounded-xl bg-rose-50/90 dark:bg-rose-950/40 border border-rose-200 dark:border-rose-800/60 px-3 py-2 text-[11px] font-semibold text-rose-800 dark:text-rose-300">
+              Membership check failed: {safeCheckError}
+            </div>
+          );
+        })()}
 
         {verification?.verificationMode === 'bot_unconfigured' && (
           <div className="rounded-xl bg-amber-50/90 dark:bg-amber-950/40 border border-amber-200 dark:border-amber-800/60 px-3 py-2 text-[11px] font-semibold text-amber-800 dark:text-amber-300">
-            Bot verification requires TELEGRAM_BOT_TOKEN on the server and adding the bot as an Admin in each channel.
+            Channel verification is temporarily unavailable right now. Please join each channel above and tap Retry shortly.
           </div>
         )}
 
@@ -466,7 +485,7 @@ export function ChannelCheckModal({
 
         {verification?.verificationMode === 'static_preview' && (
           <div className="rounded-xl bg-sky-50/90 dark:bg-sky-950/40 border border-sky-200 dark:border-sky-800/60 px-3 py-2 text-[11px] font-semibold text-sky-800 dark:text-sky-300">
-            Static preview host detected (no Node backend on this URL). Join the channels above and tap Continue or Retry once connected to your Bot backend.
+            Join all required channels above, then open inside your Telegram Bot and tap Check Channels to verify.
           </div>
         )}
 

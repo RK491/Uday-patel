@@ -698,13 +698,31 @@ export function resolveLiveTaskChannelLinks(params?: {
   };
 }
 
+const BUILT_IN_TASK_ID_SET = new Set(TASK_DEFINITIONS.map((t) => t.id));
+
+export function isBuiltInTaskId(taskId: string): boolean {
+  return BUILT_IN_TASK_ID_SET.has(taskId);
+}
+
+export function getHiddenDefaultTaskIds(customTasks: TaskDefinition[] = []): Set<string> {
+  return new Set(
+    customTasks
+      .filter((t) => BUILT_IN_TASK_ID_SET.has(t.id) && t.isActive === false)
+      .map((t) => t.id),
+  );
+}
+
 export function mergeTaskDefinitions(
   customTasks: TaskDefinition[] = [],
   liveLinks?: LiveTaskChannelLinks,
 ): TaskDefinition[] {
-  const activeCustom = customTasks.filter((t) => t.isActive !== false);
+  const hiddenDefaultIds = getHiddenDefaultTaskIds(customTasks);
+  const activeCustom = customTasks.filter(
+    (t) => !BUILT_IN_TASK_ID_SET.has(t.id) && t.isActive !== false,
+  );
+  const visibleDefaults = TASK_DEFINITIONS.filter((task) => !hiddenDefaultIds.has(task.id));
   const defaults = liveLinks
-    ? TASK_DEFINITIONS.map((task) => {
+    ? visibleDefaults.map((task) => {
         let nextUrl = task.actionUrl;
         if (GIFT_CODE_CHANNEL_TASK_IDS.has(task.id) && liveLinks.giftCodeChannelUrl) {
           nextUrl = liveLinks.giftCodeChannelUrl;
@@ -719,8 +737,29 @@ export function mergeTaskDefinitions(
           actionUrl: nextUrl,
         };
       })
-    : TASK_DEFINITIONS;
+    : visibleDefaults;
   return [...defaults, ...activeCustom];
+}
+
+export function sanitizePlayerChannelError(
+  error?: string | null,
+  status?: string,
+): string | undefined {
+  if (status === 'no_telegram_user' || status === 'bot_unconfigured') {
+    return undefined;
+  }
+  const trimmed = String(error || '').trim();
+  if (!trimmed) return undefined;
+  if (
+    /telegram_bot_token|bot_token|bot token|not configured on server|bot verification not configured/i.test(
+      trimmed,
+    )
+  ) {
+    return status === 'api_error'
+      ? 'Verification temporarily unavailable — tap Join, then Check Channels.'
+      : undefined;
+  }
+  return trimmed;
 }
 
 export function getTaskRemainingSlots(
